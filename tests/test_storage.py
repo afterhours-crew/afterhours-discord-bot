@@ -316,6 +316,22 @@ def test_clock_regression_does_not_reset_saved_cursor(store: ActivityStore) -> N
     asyncio.run(scenario())
 
 
+def test_configuration_backfill_cannot_hide_clock_regression(store: ActivityStore) -> None:
+    async def scenario() -> None:
+        revision = await commit(store, [ActivityMessage(1, 1, NOW)])
+        with pytest.raises(ActivityStateError, match="clock"):
+            await store.configure(
+                123,
+                ActiveRoleSettings(99, window_days=21),
+                as_of=NOW - timedelta(seconds=1),
+            )
+        position = await store.position(123, 10, revision, as_of=NOW)
+        assert position is not None and position.cursor_id == 1000
+        assert row_count(store) == 1
+
+    asyncio.run(scenario())
+
+
 def test_unknown_schema_is_rejected_without_rewriting_it(tmp_path: Path) -> None:
     path = tmp_path / "future.sqlite3"
     with sqlite3.connect(path) as connection:

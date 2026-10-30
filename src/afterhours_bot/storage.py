@@ -163,6 +163,11 @@ class ActivityStore:
         def operation() -> int:
             connection = self._database()
             with self._transaction(connection):
+                latest = connection.execute(
+                    "SELECT MAX(scanned_at_us) FROM scan_positions WHERE guild_id=?", (guild,)
+                ).fetchone()[0]
+                if settings is not None and latest is not None and latest > now:
+                    raise ActivityStateError("Activity clock is older than saved scan state.")
                 row = connection.execute(
                     "SELECT value_json, revision FROM configurations "
                     "WHERE guild_id=? AND key='active_role'",
