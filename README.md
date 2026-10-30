@@ -117,7 +117,8 @@ For a runtime-only installation, use `uv sync --locked --no-dev` and
 
 Nightshift can grant and remove a role according to a rolling message window.
 It checks immediately after connecting, then once an hour. Existing messages
-count, including after a restart; no message database or Docker volume is needed.
+count, including after a restart. A local SQLite database stores settings, scan
+cursors and the small amount of activity metadata needed for the rolling count.
 
 1. Create or choose your **Active** role. With Developer Mode enabled, copy its
    role ID from Discord's role settings.
@@ -148,8 +149,23 @@ count, including after a restart; no message database or Docker volume is needed
 Counts cover all visible text-capable server channels and accessible active and
 archived threads, including forum posts. Private threads count when Nightshift
 can access them. Ordinary human messages and replies count; bots, webhooks,
-system messages and deleted messages do not. Message content is never inspected
-or logged, and there is no persistent message/member store.
+system messages do not. Once counted, a message keeps counting if it is later
+deleted. Messages deleted before Nightshift observes them cannot be recovered.
+Message content is never inspected, logged or stored.
+
+The first run backfills the configured window. Later checks fetch only messages
+after each channel/thread's saved cursor, including after a restart. Counts
+expire from the local timestamps without rereading old messages. Newly accessible
+histories get their own initial backfill. Increasing the window or message
+minimum triggers a backfill because the smaller settings may have discarded
+needed metadata; unchanged or decreased settings preserve the cursors.
+
+SQLite retains only the most recent messages up to the configured minimum per
+member and source, within the configured window. Non-secret activity settings
+are saved in a versioned configuration table; `.env` remains authoritative for
+these settings. Tokens and full member profiles are never saved in the database.
+Disabling the feature clears its cached activity and cursors while retaining
+unrelated configuration.
 
 A complete scan grants the role to qualifying members and removes it from
 members below the threshold. Other roles and bots are left alone. If member or
@@ -160,10 +176,31 @@ on later checks. A timeout during role updates leaves successful changes in plac
 the next pass reads current membership and reconciles what remains.
 
 Each pass allows at most 15 minutes, 100000 members, 5000 history sources and
-250000 messages. At most 1000 role changes are attempted per pass; remaining
-changes are deferred. Logs report scan counts, failures and deferred work
+250000 newly fetched messages. At most 250000 activity records are retained per
+server. Completed histories save metadata and their cursor together; an incomplete
+history keeps its prior cursor for retry. No role changes happen until the whole
+pass has complete member/history coverage. At most 1000 role changes are attempted
+per pass; remaining changes are deferred. Logs report scan counts, failures and deferred work
 without member identities. A new live installation should be checked separately
 from the offline tests.
+
+## Persistent data
+
+Docker Compose creates the named `nightshift-data` volume at `/data` for
+`/data/nightshift.sqlite3`. Keep `NIGHTSHIFT_DATABASE_PATH` unset in `.env` for
+this setup. The non-root container can write that volume while its application
+filesystem remains read-only. SQLite is included with Python; no extra database
+service is needed.
+
+`docker compose down` and image rebuilds preserve the volume. Removing the volume
+(for example, with `docker compose down -v`) deletes the saved settings and cursors
+and requires a new backfill. Stop Nightshift before copying the volume for backup
+so that the database and its journal files remain consistent.
+
+Local runs use `data/nightshift.sqlite3` by default. Set `NIGHTSHIFT_DATABASE_PATH`
+to another persistent file path if needed. Database files are excluded from Git
+and the Docker build context. A metadata-only first backfill is required when
+upgrading from the earlier stateless scanner, since it saved no cursor state.
 
 ## Development
 

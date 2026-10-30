@@ -3,6 +3,8 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 import asyncio
 import logging
+import sqlite3
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import discord
@@ -15,6 +17,11 @@ from afterhours_bot.bot import CommunityBot
 from afterhours_bot.config import ActiveRoleSettings, Settings
 
 SETTINGS = Settings(token="example-secret", guild_id=123)  # noqa: S106
+
+
+@pytest.fixture(autouse=True)
+def isolated_working_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
 
 
 def test_commands_are_guild_scoped_and_privileged_intents_are_disabled() -> None:
@@ -222,3 +229,18 @@ def test_missing_member_intent_has_actionable_login_error(
     ):
         assert main([]) == 1
     assert "Enable Server Members Intent" in caplog.text
+
+
+def test_database_initialization_error_is_actionable_and_redacted(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("DISCORD_TOKEN", "example-secret")
+    monkeypatch.setenv("DISCORD_GUILD_ID", "123")
+    with patch(
+        "afterhours_bot.__main__.run_bot",
+        new_callable=AsyncMock,
+        side_effect=sqlite3.OperationalError("sensitive database path"),
+    ):
+        assert main([]) == 1
+    assert "Database initialization failed" in caplog.text
+    assert "sensitive database path" not in caplog.text

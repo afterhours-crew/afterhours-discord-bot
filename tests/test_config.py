@@ -1,6 +1,8 @@
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
+from pathlib import Path
+
 import pytest
 
 from afterhours_bot.config import ConfigurationError, Settings
@@ -81,3 +83,26 @@ def test_invalid_activity_configuration_fails_without_echoing_values(name: str, 
         )
     assert name in str(error.value)
     assert "example-secret" not in str(error.value)
+
+
+def test_database_path_is_configurable() -> None:
+    settings = Settings.from_env(
+        {
+            "DISCORD_TOKEN": "example-secret",
+            "DISCORD_GUILD_ID": "123",
+            "NIGHTSHIFT_DATABASE_PATH": "state/custom.sqlite3",
+        }
+    )
+    assert settings.database_path == Path("state/custom.sqlite3")
+
+
+@pytest.mark.parametrize("value", ["", " ", ":memory:", "bad\x00path"])
+def test_database_path_rejects_empty_or_nonpersistent_values(value: str) -> None:
+    with pytest.raises(ConfigurationError, match="NIGHTSHIFT_DATABASE_PATH"):
+        Settings.from_env(
+            {
+                "DISCORD_TOKEN": "example-secret",
+                "DISCORD_GUILD_ID": "123",
+                "NIGHTSHIFT_DATABASE_PATH": value,
+            }
+        )

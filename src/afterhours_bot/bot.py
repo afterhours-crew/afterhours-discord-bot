@@ -17,6 +17,7 @@ from afterhours_bot.activity_service import (
     reconcile_active_role,
 )
 from afterhours_bot.config import Settings
+from afterhours_bot.storage import ActivityStateError, ActivityStore
 
 logger = logging.getLogger(__name__)
 ACTIVITY_INTERVAL_SECONDS = 3600
@@ -61,6 +62,7 @@ class CommunityBot(discord.Client):
         self.sync_commands = sync_commands
         self.tree = CommunityTree(self)
         self._activity_task: asyncio.Task[None] | None = None
+        self.store = ActivityStore(settings.database_path)
         guild = discord.Object(id=settings.guild_id)
 
         @self.tree.command(
@@ -82,6 +84,9 @@ class CommunityBot(discord.Client):
             )
 
     async def setup_hook(self) -> None:
+        await self.store.configure(
+            self.settings.guild_id, self.settings.active_role, as_of=datetime.now(UTC)
+        )
         if self.sync_commands:
             commands = await self.tree.sync(guild=discord.Object(id=self.settings.guild_id))
             logger.info("Registered %d community commands.", len(commands))
@@ -101,7 +106,9 @@ class CommunityBot(discord.Client):
                     logger.warning("Active-role server is unavailable; no roles changed.")
                 else:
                     logger.info("Active-role scan started.")
-                    result = await reconcile_active_role(guild, settings, as_of=datetime.now(UTC))
+                    result = await reconcile_active_role(
+                        guild, settings, store=self.store, as_of=datetime.now(UTC)
+                    )
                     logger.info(
                         "Active-role scan: sources=%d messages=%d qualified=%d "
                         "granted=%d removed=%d failed=%d deferred=%d.",
@@ -115,7 +122,7 @@ class CommunityBot(discord.Client):
                     )
                     if result.failed or result.deferred:
                         logger.warning("Some active-role updates remain pending for the next scan.")
-            except (ActivityRoleUnavailable, IncompleteActivityScan) as error:
+            except (ActivityRoleUnavailable, IncompleteActivityScan, ActivityStateError) as error:
                 logger.warning("Active-role scan skipped; no roles changed: %s", error)
             except Exception as error:
                 # Keep retries alive without logging member data, tokens or raw HTTP details.
@@ -129,7 +136,10 @@ class CommunityBot(discord.Client):
             with suppress(asyncio.CancelledError):
                 await self._activity_task
             self._activity_task = None
-        await super().close()
+        try:
+            await self.store.close()
+        finally:
+            await super().close()
 
     async def on_ready(self) -> None:
         logger.info("Nightshift connected.")
