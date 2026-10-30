@@ -10,8 +10,9 @@ import pytest
 from discord import app_commands
 
 from afterhours_bot.__main__ import main
+from afterhours_bot.activity_service import ActivityResult
 from afterhours_bot.bot import CommunityBot
-from afterhours_bot.config import Settings
+from afterhours_bot.config import ActiveRoleSettings, Settings
 
 SETTINGS = Settings(token="example-secret", guild_id=123)  # noqa: S106
 
@@ -133,3 +134,91 @@ def test_authentication_failure_does_not_log_token(
         assert main([]) == 1
     assert "authentication failed" in caplog.text
     assert "example-secret" not in caplog.text
+
+
+def test_activity_needs_members_but_never_message_content_or_presence_intents() -> None:
+    async def scenario() -> None:
+        async with CommunityBot(
+            Settings(token="example-secret", guild_id=123, active_role=ActiveRoleSettings(99))  # noqa: S106
+        ) as bot:
+            assert bot.intents.members
+            assert not bot.intents.message_content
+            assert not bot.intents.presences
+            assert not bot.intents.messages
+
+    asyncio.run(scenario())
+
+
+def test_activity_worker_starts_once_and_is_cancelled_during_shutdown() -> None:
+    async def scenario() -> None:
+        started, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def blocked_worker() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        async with CommunityBot(
+            Settings(token="example-secret", guild_id=123, active_role=ActiveRoleSettings(99))  # noqa: S106
+        ) as bot:
+            with patch.object(bot, "_activity_loop", side_effect=blocked_worker) as worker:
+                await bot.setup_hook()
+                await bot.setup_hook()
+                await asyncio.wait_for(started.wait(), timeout=1)
+                worker.assert_called_once()
+                await bot.close()
+                assert cancelled.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_activity_worker_waits_for_ready_and_retries_without_leaking_error_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def scenario() -> None:
+        ready, retried = asyncio.Event(), asyncio.Event()
+        guild = Mock(unavailable=False)
+        attempts = 0
+
+        async def reconcile(*args: object, **kwargs: object) -> ActivityResult:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("sensitive member data")
+            retried.set()
+            return ActivityResult(1, 0, 0, 0, 0, 0, 0)
+
+        async with CommunityBot(
+            Settings(token="example-secret", guild_id=123, active_role=ActiveRoleSettings(99))  # noqa: S106
+        ) as bot:
+            with (
+                patch.object(bot, "wait_until_ready", side_effect=ready.wait),
+                patch.object(bot, "get_guild", return_value=guild),
+                patch("afterhours_bot.bot.reconcile_active_role", side_effect=reconcile) as sync,
+                patch("afterhours_bot.bot.ACTIVITY_INTERVAL_SECONDS", 0.01),
+            ):
+                await bot.setup_hook()
+                sync.assert_not_called()
+                ready.set()
+                await asyncio.wait_for(retried.wait(), timeout=1)
+                assert sync.call_count >= 2
+
+    asyncio.run(scenario())
+    assert "RuntimeError" in caplog.text
+    assert "sensitive member data" not in caplog.text
+
+
+def test_missing_member_intent_has_actionable_login_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("DISCORD_TOKEN", "example-secret")
+    monkeypatch.setenv("DISCORD_GUILD_ID", "123")
+    with patch(
+        "afterhours_bot.__main__.run_bot",
+        new_callable=AsyncMock,
+        side_effect=discord.PrivilegedIntentsRequired(None),
+    ):
+        assert main([]) == 1
+    assert "Enable Server Members Intent" in caplog.text
