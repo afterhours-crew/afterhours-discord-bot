@@ -1,7 +1,7 @@
 # Contributing
 
 Read the README and inspect `git status` first. Preserve existing work.
-This repository owns the community Discord bot. Keep game, launcher and server
+This repository owns Nightshift, the community Discord bot. Keep game, launcher and server
 behavior in their own Afterhours repositories. Never introduce a dependency on
 private research, a sibling checkout, captures, game content or player profiles.
 

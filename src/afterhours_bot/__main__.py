@@ -22,7 +22,7 @@ async def run_bot(settings: Settings, *, sync_commands: bool) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="The Afterhours community Discord bot")
+    parser = argparse.ArgumentParser(description="Nightshift, the Afterhours community Discord bot")
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument(
         "--check-config", action="store_true", help="Validate configuration without connecting."

@@ -59,7 +59,7 @@ class CommunityBot(discord.Client):
         @app_commands.guild_only()
         async def about(interaction: discord.Interaction[CommunityBot]) -> None:
             await interaction.response.send_message(
-                "The Afterhours community bot.\n"
+                "Nightshift, the Afterhours community bot.\n"
                 "Source: https://github.com/afterhours-crew/afterhours-discord-bot",
                 ephemeral=True,
             )
@@ -70,4 +70,4 @@ class CommunityBot(discord.Client):
             logger.info("Registered %d community commands.", len(commands))
 
     async def on_ready(self) -> None:
-        logger.info("Community bot connected.")
+        logger.info("Nightshift connected.")

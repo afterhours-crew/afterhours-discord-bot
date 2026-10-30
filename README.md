@@ -1,6 +1,6 @@
-# Afterhours community bot
+# Nightshift
 
-A Python Discord bot for the Afterhours community, managed entirely with
+Nightshift is the Python Discord bot for the Afterhours community, managed entirely with
 [uv](https://docs.astral.sh/uv/). This is a starter with two server-only slash
 commands: `/ping` checks the bot and `/about` links to its source. Replies are
 private to the person using the command.

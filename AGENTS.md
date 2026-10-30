@@ -1,7 +1,7 @@
 # Project instructions
 
 Read README.md and CONTRIBUTING.md, then inspect git status. Preserve existing
-work. This repository owns the Python Discord bot for the Afterhours community.
+work. This repository owns Nightshift, the Python bot for the Afterhours community.
 Keep it independent of game/server/launcher code and private research data.
 
 Use uv only for Python tooling and dependency management. Keep exact direct
