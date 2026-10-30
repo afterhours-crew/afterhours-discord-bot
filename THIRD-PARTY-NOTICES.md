@@ -43,6 +43,11 @@ them with the packages. No game content or private research is bundled.
 Python 3.14.7 is provided by uv's managed Python distribution and carries the
 Python Software Foundation license and its bundled third-party notices.
 
+The optional container uses the official `python:3.14.7-slim-bookworm` and
+`ghcr.io/astral-sh/uv:0.12.9` images, pinned by multi-platform digest in Dockerfile.
+The Python image includes Debian Bookworm; its packages retain their notices
+under `/usr/share/doc`. Python uses the PSF license; uv uses MIT OR Apache-2.0.
+
 References: [discord.py](https://github.com/Rapptz/discord.py),
 [uv](https://github.com/astral-sh/uv), [Ruff](https://github.com/astral-sh/ruff),
 [mypy](https://github.com/python/mypy), [pytest](https://github.com/pytest-dev/pytest).

@@ -1,0 +1,12 @@
+# Only public application inputs belong in the build context.
+**
+!Dockerfile
+!.dockerignore
+!.python-version
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!THIRD-PARTY-NOTICES.md
+!src/
+!src/**

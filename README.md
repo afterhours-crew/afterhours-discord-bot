@@ -8,7 +8,64 @@ private to the person using the command.
 The bot runs separately from the game, server and launcher. It requires Discord
 connectivity. This repository does not implement launcher Rich Presence.
 
-## Setup
+## Docker Compose
+
+Install Docker with the Compose plugin and start the Docker engine. No host
+Python or uv installation is needed for this setup.
+
+1. Create the bot application, install it in your server and obtain its token
+   and server ID as described in steps 1–3 under [Local setup](#local-setup).
+   Copy `.env.example` to `.env` and fill in those two values:
+
+   ```sh
+   cp .env.example .env
+   chmod 600 .env
+   ```
+
+2. Build the image and validate configuration without connecting to Discord:
+
+   ```sh
+   docker compose build --pull
+   docker compose run --rm nightshift --check-config
+   ```
+
+3. On first setup, register the commands:
+
+   ```sh
+   docker compose run --rm nightshift --sync-commands
+   ```
+
+   Wait for the registration log, then press Ctrl+C to stop that instance.
+   Repeat this step only when command definitions change.
+
+4. Start the service in the background:
+
+   ```sh
+   docker compose up -d
+   docker compose logs -f nightshift
+   ```
+
+The service uses `restart: unless-stopped`: Docker restarts it after an exit or
+when the Docker engine starts again, and respects an intentional stop. Configure
+the Docker engine to start automatically if you want this behavior after a host
+restart. Logs rotate automatically. The token is passed at runtime from `.env`
+and is excluded from the image and build context.
+
+To update the source and rebuild:
+
+```sh
+git pull --ff-only
+docker compose build --pull
+docker compose up -d
+```
+
+To stop the service:
+
+```sh
+docker compose down
+```
+
+## Local setup
 
 Install uv **0.12.9**. The repository pins Python **3.14.7**; uv downloads it if
 needed. From this repository:
