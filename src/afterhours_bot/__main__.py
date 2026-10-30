@@ -47,6 +47,11 @@ def main(argv: list[str] | None = None) -> int:
         asyncio.run(run_bot(settings, sync_commands=args.sync_commands))
     except KeyboardInterrupt:
         return 0
+    except discord.PrivilegedIntentsRequired:
+        logger.error(
+            "Enable Server Members Intent in the Discord Developer Portal for Active roles."
+        )
+        return 1
     except discord.LoginFailure:
         logger.error("Discord authentication failed. Check DISCORD_TOKEN.")
         return 1

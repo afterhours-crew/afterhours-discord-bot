@@ -3,14 +3,23 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 """Guild-scoped slash commands and the Discord connection edge."""
 
+import asyncio
 import logging
+from contextlib import suppress
+from datetime import UTC, datetime
 
 import discord
 from discord import app_commands
 
+from afterhours_bot.activity_service import (
+    ActivityRoleUnavailable,
+    IncompleteActivityScan,
+    reconcile_active_role,
+)
 from afterhours_bot.config import Settings
 
 logger = logging.getLogger(__name__)
+ACTIVITY_INTERVAL_SECONDS = 3600
 
 
 class CommunityTree(app_commands.CommandTree["CommunityBot"]):
@@ -40,10 +49,18 @@ class CommunityBot(discord.Client):
     def __init__(self, settings: Settings, *, sync_commands: bool = False) -> None:
         intents = discord.Intents.none()
         intents.guilds = True
-        super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none())
+        intents.members = settings.active_role is not None
+        super().__init__(
+            intents=intents,
+            allowed_mentions=discord.AllowedMentions.none(),
+            max_messages=None,
+            member_cache_flags=discord.MemberCacheFlags.none(),
+            chunk_guilds_at_startup=False,
+        )
         self.settings = settings
         self.sync_commands = sync_commands
         self.tree = CommunityTree(self)
+        self._activity_task: asyncio.Task[None] | None = None
         guild = discord.Object(id=settings.guild_id)
 
         @self.tree.command(
@@ -68,6 +85,51 @@ class CommunityBot(discord.Client):
         if self.sync_commands:
             commands = await self.tree.sync(guild=discord.Object(id=self.settings.guild_id))
             logger.info("Registered %d community commands.", len(commands))
+        if self.settings.active_role is not None and self._activity_task is None:
+            self._activity_task = asyncio.create_task(self._activity_loop(), name="active-role")
+
+    async def _activity_loop(self) -> None:
+        settings = self.settings.active_role
+        if settings is None:
+            return
+        while not self.is_closed():
+            await self.wait_until_ready()
+            cycle_started = asyncio.get_running_loop().time()
+            try:
+                guild = self.get_guild(self.settings.guild_id)
+                if guild is None or guild.unavailable:
+                    logger.warning("Active-role server is unavailable; no roles changed.")
+                else:
+                    logger.info("Active-role scan started.")
+                    result = await reconcile_active_role(guild, settings, as_of=datetime.now(UTC))
+                    logger.info(
+                        "Active-role scan: sources=%d messages=%d qualified=%d "
+                        "granted=%d removed=%d failed=%d deferred=%d.",
+                        result.sources,
+                        result.messages,
+                        result.qualified,
+                        result.granted,
+                        result.removed,
+                        result.failed,
+                        result.deferred,
+                    )
+                    if result.failed or result.deferred:
+                        logger.warning("Some active-role updates remain pending for the next scan.")
+            except (ActivityRoleUnavailable, IncompleteActivityScan) as error:
+                logger.warning("Active-role scan skipped; no roles changed: %s", error)
+            except Exception as error:
+                # Keep retries alive without logging member data, tokens or raw HTTP details.
+                logger.warning("Active-role scan did not complete (%s).", type(error).__name__)
+            elapsed = asyncio.get_running_loop().time() - cycle_started
+            await asyncio.sleep(max(0, ACTIVITY_INTERVAL_SECONDS - elapsed))
+
+    async def close(self) -> None:
+        if self._activity_task is not None:
+            self._activity_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._activity_task
+            self._activity_task = None
+        await super().close()
 
     async def on_ready(self) -> None:
         logger.info("Nightshift connected.")

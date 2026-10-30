@@ -4,6 +4,7 @@ Nightshift is the Python Discord bot for the Afterhours community, managed entir
 [uv](https://docs.astral.sh/uv/). This is a starter with two server-only slash
 commands: `/ping` checks the bot and `/about` links to its source. Replies are
 private to the person using the command.
+An optional activity feature maintains a role based on recent member messages.
 
 The bot runs separately from the game, server and launcher. It requires Discord
 connectivity. This repository does not implement launcher Rich Presence.
@@ -76,7 +77,8 @@ uv sync --locked
 
 1. Create an application and bot in the
    [Discord Developer Portal](https://discord.com/developers/applications).
-   Keep Message Content, Server Members and Presence privileged intents disabled.
+   Leave Message Content and Presence privileged intents disabled. Server Members
+   Intent is needed only when enabling [Active roles](#active-roles).
 2. Install it in your community server with the `bot` and `applications.commands`
    scopes. The starter needs no additional bot permissions; do not grant
    Administrator. Only server installation is used.
@@ -110,6 +112,58 @@ previously registered in another server; their use is rejected by the bot.
 
 For a runtime-only installation, use `uv sync --locked --no-dev` and
 `uv run --locked --no-dev --env-file .env afterhours-bot`.
+
+## Active roles
+
+Nightshift can grant and remove a role according to a rolling message window.
+It checks immediately after connecting, then once an hour. Existing messages
+count, including after a restart; no message database or Docker volume is needed.
+
+1. Create or choose your **Active** role. With Developer Mode enabled, copy its
+   role ID from Discord's role settings.
+2. Place that role below Nightshift's highest role. Nightshift needs **Manage
+   Roles**, **View Channels** and **Read Message History** for the channels it
+   should count.
+3. In the Developer Portal's **Bot** settings, enable **Server Members Intent**.
+   Keep **Message Content Intent** and **Presence Intent** disabled.
+4. Add these values to `.env`, replacing the example role ID:
+
+   ```dotenv
+   ACTIVE_ROLE_ID=123456789012345678
+   ACTIVE_WINDOW_DAYS=14
+   ACTIVE_MIN_MESSAGES=3
+   ```
+
+   The minimum is inclusive: `3` means at least three messages, or more than two.
+   Days can be 1–365 and the minimum can be 1–10000. Leaving `ACTIVE_ROLE_ID`
+   empty disables this feature and the members intent.
+
+5. Rebuild and recreate the service to apply the configuration:
+
+   ```sh
+   docker compose up -d --build --force-recreate nightshift
+   docker compose logs -f nightshift
+   ```
+
+Counts cover all visible text-capable server channels and accessible active and
+archived threads, including forum posts. Private threads count when Nightshift
+can access them. Ordinary human messages and replies count; bots, webhooks,
+system messages and deleted messages do not. Message content is never inspected
+or logged, and there is no persistent message/member store.
+
+A complete scan grants the role to qualifying members and removes it from
+members below the threshold. Other roles and bots are left alone. If member or
+history enumeration fails, a visible channel lacks history permission, or a limit
+is reached before enumeration completes, no roles change for that pass. The next hourly check retries.
+Individual role-update failures are reported as aggregate counts and retried
+on later checks. A timeout during role updates leaves successful changes in place;
+the next pass reads current membership and reconciles what remains.
+
+Each pass allows at most 15 minutes, 100000 members, 5000 history sources and
+250000 messages. At most 1000 role changes are attempted per pass; remaining
+changes are deferred. Logs report scan counts, failures and deferred work
+without member identities. A new live installation should be checked separately
+from the offline tests.
 
 ## Development
 

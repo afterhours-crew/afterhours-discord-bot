@@ -31,3 +31,53 @@ def test_invalid_guild_id_never_leaks_values(guild_id: str) -> None:
 def test_missing_environment_is_rejected() -> None:
     with pytest.raises(ConfigurationError):
         Settings.from_env({})
+
+
+def test_activity_is_optional_and_defaults_match_three_messages_in_fourteen_days() -> None:
+    env = {"DISCORD_TOKEN": "example-secret", "DISCORD_GUILD_ID": "123"}
+    assert Settings.from_env(env).active_role is None
+    settings = Settings.from_env({**env, "ACTIVE_ROLE_ID": "456"})
+    assert settings.active_role is not None
+    assert settings.active_role.role_id == 456
+    assert settings.active_role.window_days == 14
+    assert settings.active_role.min_messages == 3
+
+
+def test_activity_days_and_minimum_are_configurable() -> None:
+    settings = Settings.from_env(
+        {
+            "DISCORD_TOKEN": "example-secret",
+            "DISCORD_GUILD_ID": "123",
+            "ACTIVE_ROLE_ID": "456",
+            "ACTIVE_WINDOW_DAYS": "7",
+            "ACTIVE_MIN_MESSAGES": "5",
+        }
+    )
+    assert settings.active_role is not None
+    assert (settings.active_role.window_days, settings.active_role.min_messages) == (7, 5)
+
+
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("ACTIVE_ROLE_ID", "0"),
+        ("ACTIVE_ROLE_ID", "not-an-id"),
+        ("ACTIVE_ROLE_ID", "18446744073709551616"),
+        ("ACTIVE_WINDOW_DAYS", "0"),
+        ("ACTIVE_WINDOW_DAYS", "366"),
+        ("ACTIVE_WINDOW_DAYS", "abc"),
+        ("ACTIVE_WINDOW_DAYS", "1.5"),
+        ("ACTIVE_MIN_MESSAGES", "0"),
+        ("ACTIVE_MIN_MESSAGES", "10001"),
+        ("ACTIVE_MIN_MESSAGES", "-1"),
+        ("ACTIVE_MIN_MESSAGES", "３"),
+        ("ACTIVE_MIN_MESSAGES", "9" * 5000),
+    ],
+)
+def test_invalid_activity_configuration_fails_without_echoing_values(name: str, value: str) -> None:
+    with pytest.raises(ConfigurationError) as error:
+        Settings.from_env(
+            {"DISCORD_TOKEN": "example-secret", "DISCORD_GUILD_ID": "123", name: value}
+        )
+    assert name in str(error.value)
+    assert "example-secret" not in str(error.value)

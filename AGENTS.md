@@ -19,7 +19,10 @@ Stage explicit paths and inspect the staged diff.
 
 Use GitHub issues for tasks and acceptance criteria. Keep changes within their
 scope. Default to server-only slash commands, minimal intents and permissions,
-private replies and no stored member/message data. New community features and
+private replies and no persistent member/message data. The optional Active-role
+feature counts metadata from accessible histories in memory, uses the configured
+window/minimum, and reconciles one configured role. Never apply role changes after
+an incomplete history or member scan. New community features and
 permission increases need an explicit request. Never log tokens or raw payloads.
 Keep automated checks offline; do not connect a bot or publish Discord messages
 without explicit authorization and operator-provided configuration.
