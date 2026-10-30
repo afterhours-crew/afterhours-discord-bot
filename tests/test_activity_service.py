@@ -2,8 +2,11 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 import asyncio
+import sys
 from collections.abc import AsyncIterator, Iterable
 from datetime import UTC, datetime, timedelta
+from functools import partial
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -17,9 +20,20 @@ from afterhours_bot.activity_service import (
     reconcile_active_role,
 )
 from afterhours_bot.config import ActiveRoleSettings
+from afterhours_bot.storage import ActivityStore
 
 NOW = datetime(2026, 10, 30, 12, tzinfo=UTC)
 CONFIG = ActiveRoleSettings(99)
+
+
+@pytest.fixture(autouse=True)
+def persistent_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterable[ActivityStore]:
+    store = ActivityStore(tmp_path / "activity.sqlite3")
+    monkeypatch.setattr(
+        sys.modules[__name__], "reconcile_active_role", partial(reconcile_active_role, store=store)
+    )
+    yield store
+    asyncio.run(store.close())
 
 
 async def stream[T](items: Iterable[T], error: Exception | None = None) -> AsyncIterator[T]:
@@ -40,7 +54,7 @@ class MetadataMessage:
         message_type: discord.MessageType = discord.MessageType.default,
         created_at: datetime = NOW - timedelta(hours=1),
     ) -> None:
-        self.id = message_id
+        self.id = discord.utils.time_snowflake(created_at, high=False) + message_id
         self.author = SimpleNamespace(id=author_id, bot=bot)
         self.webhook_id = 123 if webhook else None
         self.type = message_type
@@ -90,7 +104,18 @@ def source(
     channel.permissions_for.return_value = SimpleNamespace(
         view_channel=visible, read_message_history=history, manage_threads=manage_threads
     )
-    channel.history = Mock(side_effect=lambda **_: stream(messages, error))
+
+    def history(**kwargs: object) -> AsyncIterator[MetadataMessage]:
+        after = kwargs["after"]
+        before = kwargs["before"]
+        assert isinstance(after, discord.Object) and isinstance(before, discord.Object)
+        selected = sorted(
+            (message for message in messages if after.id < message.id < before.id),
+            key=lambda message: message.id,
+        )
+        return stream(selected, error)
+
+    channel.history = Mock(side_effect=history)
     channel.archived_threads = Mock(
         side_effect=lambda **kwargs: stream(private if kwargs.get("private") else public)
     )
@@ -132,7 +157,12 @@ def test_complete_scan_grants_removes_and_preserves_other_roles() -> None:
     assert (result.sources, result.granted, result.removed) == (2, 1, 1)
     for channel in guild.channels:
         channel.history.assert_called_once_with(
-            limit=250_001, after=NOW - timedelta(days=14), before=NOW, oldest_first=False
+            limit=250_001,
+            after=discord.Object(
+                id=discord.utils.time_snowflake(NOW - timedelta(days=14), high=True)
+            ),
+            before=discord.Object(id=discord.utils.time_snowflake(NOW, high=False)),
+            oldest_first=True,
         )
 
 

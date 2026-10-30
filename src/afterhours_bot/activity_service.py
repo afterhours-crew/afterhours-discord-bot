@@ -6,12 +6,13 @@
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import discord
 
-from afterhours_bot.activity import ActivityCounter, ActivityMessage, MemberActivity, plan_roles
+from afterhours_bot.activity import ActivityMessage, MemberActivity, plan_roles
 from afterhours_bot.config import ActiveRoleSettings
+from afterhours_bot.storage import ActivityStore
 
 type HistorySource = (
     discord.TextChannel | discord.VoiceChannel | discord.StageChannel | discord.Thread
@@ -111,11 +112,13 @@ async def reconcile_active_role(
     guild: discord.Guild,
     settings: ActiveRoleSettings,
     *,
+    store: ActivityStore,
     as_of: datetime,
     limits: ScanLimits = DEFAULT_SCAN_LIMITS,
 ) -> ActivityResult:
     """No changes occur until every selected history and the member list have completed."""
     async with asyncio.timeout(limits.timeout_seconds):
+        revision = await store.configure(guild.id, settings, as_of=as_of)
         me = guild.me
         role = guild.get_role(settings.role_id)
         if me is None or role is None or not me.guild_permissions.manage_roles:
@@ -131,35 +134,64 @@ async def reconcile_active_role(
                 raise IncompleteActivityScan("Member limit reached.")
             members[member.id] = member
 
-        counter = ActivityCounter(settings, as_of=as_of)
+        cutoff = as_of - timedelta(days=settings.window_days)
+        window_start = discord.utils.time_snowflake(cutoff, high=True)
+        # Exclude the current millisecond; the following pass will include it without gaps.
+        boundary = discord.utils.time_snowflake(as_of, high=False)
+        if window_start < 0 or boundary <= window_start:
+            raise IncompleteActivityScan("Activity clock is outside the supported history range.")
+        source_ids: list[int] = []
         source_count = message_count = 0
         async for source in _history_sources(guild, me, limits):
             source_count += 1
-            async for message in source.history(
-                limit=limits.messages + 1,
-                after=counter.cutoff,
-                before=counter.as_of,
-                oldest_first=False,
-            ):
-                message_count += 1
-                if message_count > limits.messages:
-                    raise IncompleteActivityScan("Message limit reached.")
-                if message.author.id in members and not members[message.author.id].bot:
-                    counter.add(
-                        ActivityMessage(
-                            message_id=message.id,
-                            author_id=message.author.id,
-                            created_at=message.created_at,
-                            is_bot=message.author.bot,
-                            is_webhook=message.webhook_id is not None,
-                            is_user_message=message.type
-                            in (discord.MessageType.default, discord.MessageType.reply),
+            source_ids.append(source.id)
+            position = await store.position(guild.id, source.id, revision, as_of=as_of)
+            after = max(window_start, position.cursor_id if position is not None else 0)
+            staged: list[ActivityMessage] = []
+            if after < boundary - 1:
+                async for message in source.history(
+                    limit=limits.messages + 1,
+                    after=discord.Object(id=after),
+                    before=discord.Object(id=boundary),
+                    oldest_first=True,
+                ):
+                    message_count += 1
+                    if message_count > limits.messages:
+                        raise IncompleteActivityScan("Message limit reached.")
+                    if not after < message.id < boundary:
+                        raise IncompleteActivityScan("History did not respect the scan cursor.")
+                    if (
+                        not message.author.bot
+                        and message.webhook_id is None
+                        and message.type in (discord.MessageType.default, discord.MessageType.reply)
+                        and cutoff < message.created_at <= as_of
+                    ):
+                        staged.append(
+                            ActivityMessage(message.id, message.author.id, message.created_at)
                         )
-                    )
+            # Commit metadata and the cursor together only after this source completes.
+            await store.commit_source(
+                guild.id,
+                source.id,
+                settings,
+                revision,
+                expected=position,
+                cursor_id=boundary - 1,
+                as_of=as_of,
+                messages=staged,
+                max_rows=limits.messages,
+            )
 
         if not source_count:
             raise IncompleteActivityScan("No readable message histories are available.")
-        qualified = counter.qualifying_members()
+        qualified = await store.qualified(
+            guild.id,
+            settings,
+            revision,
+            source_ids=source_ids,
+            member_ids=[member.id for member in members.values() if not member.bot],
+            as_of=as_of,
+        )
         plan = plan_roles(
             (
                 MemberActivity(

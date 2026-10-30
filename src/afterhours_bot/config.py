@@ -5,6 +5,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 class ConfigurationError(ValueError):
@@ -42,6 +43,7 @@ class Settings:
     token: str = field(repr=False)
     guild_id: int
     active_role: ActiveRoleSettings | None = None
+    database_path: Path = Path("data/nightshift.sqlite3")
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -66,4 +68,12 @@ class Settings:
             if raw_role
             else None
         )
-        return cls(token=token, guild_id=guild_id, active_role=active_role)
+        database_path = env.get("NIGHTSHIFT_DATABASE_PATH", "data/nightshift.sqlite3").strip()
+        if not database_path or "\x00" in database_path or database_path == ":memory:":
+            raise ConfigurationError("NIGHTSHIFT_DATABASE_PATH must name a database file.")
+        return cls(
+            token=token,
+            guild_id=guild_id,
+            active_role=active_role,
+            database_path=Path(database_path),
+        )

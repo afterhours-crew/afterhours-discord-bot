@@ -21,7 +21,8 @@ LABEL org.opencontainers.image.title="Nightshift" \
 
 RUN groupadd --gid 10001 nightshift \
     && useradd --uid 10001 --gid nightshift --no-create-home \
-       --home-dir /app --shell /usr/sbin/nologin nightshift
+       --home-dir /app --shell /usr/sbin/nologin nightshift \
+    && mkdir /data && chown 10001:10001 /data
 
 WORKDIR /app
 COPY --from=uv /uv /usr/local/bin/uv
@@ -31,7 +32,8 @@ COPY .python-version pyproject.toml uv.lock README.md LICENSE THIRD-PARTY-NOTICE
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_PYTHON_DOWNLOADS=never \
-    UV_NO_CACHE=1
+    UV_NO_CACHE=1 \
+    NIGHTSHIFT_DATABASE_PATH=/data/nightshift.sqlite3
 
 USER 10001:10001
 STOPSIGNAL SIGINT

@@ -7,11 +7,13 @@ import argparse
 import asyncio
 import logging
 import os
+import sqlite3
 
 import discord
 
 from afterhours_bot.bot import CommunityBot
 from afterhours_bot.config import ConfigurationError, Settings
+from afterhours_bot.storage import ActivityStateError
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,13 @@ def main(argv: list[str] | None = None) -> int:
         asyncio.run(run_bot(settings, sync_commands=args.sync_commands))
     except KeyboardInterrupt:
         return 0
+    except (sqlite3.Error, ActivityStateError) as error:
+        logger.error(
+            "Database initialization failed (%s). Check the database path, volume permissions "
+            "and schema compatibility.",
+            type(error).__name__,
+        )
+        return 1
     except discord.PrivilegedIntentsRequired:
         logger.error(
             "Enable Server Members Intent in the Discord Developer Portal for Active roles."

@@ -19,9 +19,13 @@ Stage explicit paths and inspect the staged diff.
 
 Use GitHub issues for tasks and acceptance criteria. Keep changes within their
 scope. Default to server-only slash commands, minimal intents and permissions,
-private replies and no persistent member/message data. The optional Active-role
-feature counts metadata from accessible histories in memory, uses the configured
-window/minimum, and reconciles one configured role. Never apply role changes after
+private replies and no message text storage. SQLite stores non-secret settings,
+per-source scan cursors and only the latest activity metadata needed per member
+and source for the configured threshold/window. Keep database work off the event
+loop, version the schema and commit metadata/cursor updates transactionally.
+Never persist tokens, message text or full member profiles. The optional Active-role
+feature uses the configured window/minimum and reconciles one role. Never apply
+role changes after
 an incomplete history or member scan. New community features and
 permission increases need an explicit request. Never log tokens or raw payloads.
 Keep automated checks offline; do not connect a bot or publish Discord messages

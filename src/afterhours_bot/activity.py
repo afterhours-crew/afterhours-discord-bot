@@ -5,9 +5,7 @@
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-
-from afterhours_bot.config import ActiveRoleSettings
+from datetime import datetime
 
 
 @dataclass(frozen=True)
@@ -18,36 +16,6 @@ class ActivityMessage:
     is_bot: bool = False
     is_webhook: bool = False
     is_user_message: bool = True
-
-
-class ActivityCounter:
-    def __init__(self, settings: ActiveRoleSettings, *, as_of: datetime) -> None:
-        if as_of.utcoffset() is None:
-            raise ValueError("Activity time must include a timezone.")
-        self.as_of = as_of
-        self.cutoff = as_of - timedelta(days=settings.window_days)
-        self.minimum = settings.min_messages
-        self._messages: dict[int, set[int]] = {}
-
-    def add(self, message: ActivityMessage) -> None:
-        if (
-            message.is_bot
-            or message.is_webhook
-            or not message.is_user_message
-            or not self.cutoff < message.created_at <= self.as_of
-        ):
-            return
-        messages = self._messages.setdefault(message.author_id, set())
-        # Saturation bounds storage while retaining duplicate protection below the threshold.
-        if len(messages) < self.minimum:
-            messages.add(message.message_id)
-
-    def qualifying_members(self) -> frozenset[int]:
-        return frozenset(
-            author_id
-            for author_id, messages in self._messages.items()
-            if len(messages) >= self.minimum
-        )
 
 
 @dataclass(frozen=True)
