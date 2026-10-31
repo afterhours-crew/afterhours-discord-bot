@@ -14,6 +14,7 @@ from pathlib import Path
 
 from afterhours_bot.activity import ActivityMessage
 from afterhours_bot.config import ActiveRoleSettings
+from afterhours_bot.filters import Flag
 from afterhours_bot.rules import RuleSet
 
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -40,6 +41,14 @@ def _identifier(value: int) -> str:
 class SourcePosition:
     cursor_id: int
     scanned_at_us: int
+
+
+@dataclass(frozen=True)
+class ReviewDecision:
+    flags: int
+    decision: str
+    decider_id: int
+    already_decided: bool
 
 
 class ActivityStore:
@@ -75,10 +84,32 @@ class ActivityStore:
         try:
             connection.row_factory = sqlite3.Row
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise ActivityStateError("Unsupported activity database schema version.")
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA secure_delete=ON")
+            if version < 2:
+                with self._transaction(connection):
+                    connection.execute(
+                        "CREATE TABLE review_flags (guild_id TEXT NOT NULL, "
+                        "message_id TEXT NOT NULL, source TEXT NOT NULL, "
+                        "channel_id TEXT NOT NULL, author_id TEXT NOT NULL, "
+                        "rule INTEGER NOT NULL, score REAL NOT NULL, reason TEXT NOT NULL, "
+                        "rules_revision INTEGER, post_message_id TEXT, "
+                        "created_us INTEGER NOT NULL, expires_us INTEGER NOT NULL, "
+                        "decision TEXT, decider_id TEXT, decided_us INTEGER, "
+                        "PRIMARY KEY (guild_id, message_id, source))"
+                    )
+                    connection.execute(
+                        "CREATE INDEX review_flags_post ON review_flags (guild_id, post_message_id)"
+                    )
+                    connection.execute(
+                        "CREATE INDEX review_flags_expiry ON review_flags (expires_us)"
+                    )
+                    connection.execute(
+                        "CREATE INDEX review_flags_age ON review_flags (guild_id, created_us)"
+                    )
+                    connection.execute("PRAGMA user_version=2")
             if version == 0:
                 with self._transaction(connection):
                     connection.execute(
@@ -104,7 +135,7 @@ class ActivityStore:
                         "(guild_id, source_id, author_id, created_us DESC, message_id DESC)"
                     )
                     connection.execute("CREATE INDEX activity_expiry ON activity (expires_us)")
-                    connection.execute("PRAGMA user_version=1")
+                    connection.execute("PRAGMA user_version=2")
             try:
                 self.path.chmod(0o600)
             except OSError:
@@ -417,6 +448,136 @@ class ActivityStore:
             except ValueError, TypeError, KeyError:
                 raise ActivityStateError("Saved moderation rules are invalid.") from None
             return int(row[1]), digest
+
+        return await self._call(operation)
+
+    async def record_flags(
+        self,
+        guild_id: int,
+        *,
+        message_id: int,
+        channel_id: int,
+        author_id: int,
+        flags: Sequence[Flag],
+        rules_revision: int | None,
+        post_message_id: int | None,
+        as_of: datetime,
+        retention_days: int,
+        max_rows: int,
+    ) -> None:
+        """Audit the flags for one message. Only identifiers and configured reasons are kept."""
+        guild, now = _identifier(guild_id), microseconds(as_of)
+        message, channel, author = (
+            _identifier(message_id),
+            _identifier(channel_id),
+            _identifier(author_id),
+        )
+        post = _identifier(post_message_id) if post_message_id is not None else None
+        rows = [
+            (
+                guild,
+                message,
+                flag.source,
+                channel,
+                author,
+                flag.rule,
+                flag.score,
+                flag.reason,
+                rules_revision,
+                post,
+                now,
+                now + retention_days * DAY_MICROSECONDS,
+            )
+            for flag in flags
+        ]
+
+        def operation() -> None:
+            connection = self._database()
+            with self._transaction(connection):
+                connection.executemany(
+                    "INSERT INTO review_flags (guild_id, message_id, source, channel_id, "
+                    "author_id, rule, score, reason, rules_revision, post_message_id, "
+                    "created_us, expires_us) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(guild_id, message_id, source) DO UPDATE SET "
+                    "post_message_id=COALESCE(excluded.post_message_id, post_message_id)",
+                    rows,
+                )
+                self._prune_flags(connection, guild, now, max_rows)
+
+        await self._call(operation)
+
+    @staticmethod
+    def _prune_flags(connection: sqlite3.Connection, guild: str, now: int, max_rows: int) -> None:
+        connection.execute("DELETE FROM review_flags WHERE expires_us<=?", (now,))
+        count = connection.execute(
+            "SELECT COUNT(*) FROM review_flags WHERE guild_id=?", (guild,)
+        ).fetchone()[0]
+        if count > max_rows:
+            connection.execute(
+                "DELETE FROM review_flags WHERE rowid IN (SELECT rowid FROM review_flags "
+                "WHERE guild_id=? ORDER BY created_us ASC, rowid ASC LIMIT ?)",
+                (guild, count - max_rows),
+            )
+
+    async def record_decision(
+        self,
+        guild_id: int,
+        post_message_id: int,
+        *,
+        decision: str,
+        decider_id: int,
+        as_of: datetime,
+    ) -> ReviewDecision | None:
+        """Record one staff decision for a review post; an earlier decision is kept."""
+        guild, post, decider, now = (
+            _identifier(guild_id),
+            _identifier(post_message_id),
+            _identifier(decider_id),
+            microseconds(as_of),
+        )
+        if not decision or len(decision) > 32 or not decision.isascii():
+            raise ActivityStateError("Invalid review decision.")
+
+        def operation() -> ReviewDecision | None:
+            connection = self._database()
+            with self._transaction(connection):
+                rows = connection.execute(
+                    "SELECT decision, decider_id FROM review_flags "
+                    "WHERE guild_id=? AND post_message_id=?",
+                    (guild, post),
+                ).fetchall()
+                if not rows:
+                    return None
+                settled = [row for row in rows if row[0] is not None]
+                if settled:
+                    return ReviewDecision(
+                        flags=len(rows),
+                        decision=str(settled[0][0]),
+                        decider_id=int(settled[0][1]),
+                        already_decided=True,
+                    )
+                connection.execute(
+                    "UPDATE review_flags SET decision=?, decider_id=?, decided_us=? "
+                    "WHERE guild_id=? AND post_message_id=?",
+                    (decision, decider, now, guild, post),
+                )
+                return ReviewDecision(
+                    flags=len(rows), decision=decision, decider_id=decider_id, already_decided=False
+                )
+
+        return await self._call(operation)
+
+    async def flag_summary(self, guild_id: int) -> tuple[int, int]:
+        """Stored flags and how many of them are still undecided."""
+        guild = _identifier(guild_id)
+
+        def operation() -> tuple[int, int]:
+            connection = self._database()
+            row = connection.execute(
+                "SELECT COUNT(*), SUM(decision IS NULL) FROM review_flags WHERE guild_id=?",
+                (guild,),
+            ).fetchone()
+            return int(row[0]), int(row[1] or 0)
 
         return await self._call(operation)
 

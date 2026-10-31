@@ -19,14 +19,20 @@ class ActiveRoleSettings:
     min_messages: int = 3
 
 
-def _positive_integer(env: Mapping[str, str], name: str, default: int, maximum: int) -> int:
+def _bounded_integer(
+    env: Mapping[str, str], name: str, default: int, minimum: int, maximum: int
+) -> int:
     raw = env.get(name, str(default)).strip()
     if not raw.isascii() or not raw.isdecimal() or len(raw) > len(str(maximum)):
-        raise ConfigurationError(f"{name} must be an integer between 1 and {maximum}.")
+        raise ConfigurationError(f"{name} must be an integer between {minimum} and {maximum}.")
     value = int(raw)
-    if not 1 <= value <= maximum:
-        raise ConfigurationError(f"{name} must be an integer between 1 and {maximum}.")
+    if not minimum <= value <= maximum:
+        raise ConfigurationError(f"{name} must be an integer between {minimum} and {maximum}.")
     return value
+
+
+def _positive_integer(env: Mapping[str, str], name: str, default: int, maximum: int) -> int:
+    return _bounded_integer(env, name, default, 1, maximum)
 
 
 def _snowflake(raw: str, name: str) -> int:
@@ -39,12 +45,32 @@ def _snowflake(raw: str, name: str) -> int:
 
 
 @dataclass(frozen=True)
+class DenyEntry:
+    """A lowercase host or file extension mapped to the community rule it breaks."""
+
+    value: str
+    rule: int
+
+
+DEFAULT_ATTACHMENT_DENYLIST = (
+    "exe:2,msi:2,dll:2,bat:9,cmd:9,scr:9,com:9,pif:9,vbs:9,vbe:9,js:9,jse:9,ps1:9,jar:9,reg:9,lnk:9"
+)
+
+
+@dataclass(frozen=True)
 class ModerationSettings:
     """Review is enabled by naming the staff channel; it needs the Message Content intent."""
 
     staff_channel_id: int
     rules_path: Path = Path("rules/community-rules.md")
     queue_size: int = 1000
+    repeat_window_seconds: int = 60
+    repeat_threshold: int = 3
+    link_denylist: tuple[DenyEntry, ...] = ()
+    attachment_denylist: tuple[DenyEntry, ...] = ()
+    audit_retention_days: int = 90
+    audit_max_rows: int = 100_000
+    flags_per_minute: int = 20
 
 
 def _file_path(env: Mapping[str, str], name: str, default: str) -> Path:
@@ -52,6 +78,31 @@ def _file_path(env: Mapping[str, str], name: str, default: str) -> Path:
     if not raw or "\x00" in raw:
         raise ConfigurationError(f"{name} must name a file.")
     return Path(raw)
+
+
+def _deny_list(env: Mapping[str, str], name: str, default: str) -> tuple[DenyEntry, ...]:
+    """Parse `value:rule` pairs separated by commas; values are hosts or extensions."""
+    raw = env.get(name, default)
+    entries: dict[str, int] = {}
+    for item in raw.split(","):
+        item = item.strip().lower()
+        if not item:
+            continue
+        value, separator, rule = item.rpartition(":")
+        if (
+            not separator
+            or not value
+            or len(value) > 253
+            or not value.isascii()
+            or any(character.isspace() or character == "/" for character in value)
+            or not rule.isdecimal()
+            or not 1 <= int(rule) <= 99
+        ):
+            raise ConfigurationError(f"{name} entries must look like value:rule with rule 1-99.")
+        entries[value.strip(".")] = int(rule)
+    if len(entries) > 1000:
+        raise ConfigurationError(f"{name} supports at most 1000 entries.")
+    return tuple(DenyEntry(value, rule) for value, rule in sorted(entries.items()))
 
 
 @dataclass(frozen=True)
@@ -96,6 +147,21 @@ class Settings:
                 staff_channel_id=_snowflake(raw_staff_channel, "MODERATION_STAFF_CHANNEL_ID"),
                 rules_path=rules_path,
                 queue_size=queue_size,
+                repeat_window_seconds=_positive_integer(
+                    env, "MODERATION_REPEAT_WINDOW_SECONDS", 60, 3600
+                ),
+                repeat_threshold=_bounded_integer(env, "MODERATION_REPEAT_THRESHOLD", 3, 2, 100),
+                link_denylist=_deny_list(env, "MODERATION_LINK_DENYLIST", ""),
+                attachment_denylist=_deny_list(
+                    env, "MODERATION_ATTACHMENT_DENYLIST", DEFAULT_ATTACHMENT_DENYLIST
+                ),
+                audit_retention_days=_positive_integer(
+                    env, "MODERATION_AUDIT_RETENTION_DAYS", 90, 3650
+                ),
+                audit_max_rows=_bounded_integer(
+                    env, "MODERATION_AUDIT_MAX_ROWS", 100_000, 100, 10_000_000
+                ),
+                flags_per_minute=_positive_integer(env, "MODERATION_FLAGS_PER_MINUTE", 20, 600),
             )
             if raw_staff_channel
             else None

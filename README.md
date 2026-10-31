@@ -190,15 +190,24 @@ from the offline tests.
 
 ## Moderation
 
-Nightshift can help staff enforce the community rules. This foundation receives
-member messages, filters out what is out of scope and queues the rest for review.
-No review layer exists yet, so nothing is flagged, deleted or announced; later
-versions add deterministic filters, an optional local language-model classifier
-and staff review posts. Every action will remain a staff decision.
+Nightshift can help staff enforce the community rules. It receives member
+messages, runs deterministic filters and posts anything suspicious to a staff
+review channel with Dismiss, Delete, Warn and Timeout buttons. This is **shadow
+mode**: the bot only reports and records; it never deletes, warns, times out or
+announces on its own. Dismiss resolves a post; the other buttons record the
+staff decision and ask you to act manually until a later version performs them.
+A local language-model review layer comes later.
 
-1. Create or choose a private **staff review channel**. With Developer Mode
-   enabled, copy its channel ID. Messages in that channel and its threads are
-   never reviewed.
+Use Discord's built-in **AutoMod** (Server Settings → AutoMod) as the first
+layer: keyword and regex lists, mention spam, suspected spam and known malicious
+links, plus the explicit media filter. Those run inside Discord with no bot
+permissions and no intent, so Nightshift does not duplicate them. The bot adds
+what AutoMod cannot express: repeated messages, your own domain list mapped to
+rule numbers, attachment types and, later, judgement calls against the rule text.
+
+1. Create or choose a private **staff review channel** where Nightshift can
+   **View Channel** and **Send Messages**. With Developer Mode enabled, copy its
+   channel ID. Messages in that channel and its threads are never reviewed.
 2. In the Developer Portal's **Bot** settings, enable **Message Content
    Intent**. Without it Discord delivers messages with empty content and the bot
    refuses to start with an error naming this setting.
@@ -224,8 +233,8 @@ text, for example from a mounted volume.
 
 `/moderation` is a staff command, visible by default to members with **Manage
 Messages**, and replies privately with the feature state, staff channel, rule
-revision, intent status and intake counters. It never shows message text,
-member identities or secrets.
+revision, intent status, intake and flag counters and the audit size. It never
+shows message text, member identities or secrets.
 
 Only ordinary messages and replies from members in the configured server are
 queued; bots, webhooks, system messages, direct messages and the staff channel
@@ -235,6 +244,40 @@ a minute, without content. Message text is held in memory only while queued and
 is never written to the database or the log. Enabling moderation adds the
 `guild_messages` and `message_content` intents and nothing else. Leaving
 `MODERATION_STAFF_CHANNEL_ID` empty keeps the bot exactly as before.
+
+### Filters
+
+Each filter maps to a rule number from the rule file:
+
+- **Repeated messages** (rule 6): the same text, ignoring case and spacing,
+  posted `MODERATION_REPEAT_THRESHOLD` times (default 3) by one member within
+  `MODERATION_REPEAT_WINDOW_SECONDS` (default 60). Memory is bounded to the most
+  recent authors and messages.
+- **Server invite links** (rule 6): `discord.gg` and `discord.com/invite` links.
+- **Listed link domains**: `MODERATION_LINK_DENYLIST` holds `domain:rule` pairs
+  (for example `example-piracy.site:2`); subdomains match. Empty by default.
+- **Attachment types**: `MODERATION_ATTACHMENT_DENYLIST` holds `extension:rule`
+  pairs. The default lists executables and installers under rule 2 and script
+  types under rule 9.
+
+### Review posts and audit
+
+A flag posts to the staff channel with the rule number, the filter's reason, a
+confidence value, the filter name, a jump link to the message, the author and
+channel mentions (never pinged) and the rule revision. The post does not quote
+the message; staff read it through the link. Posts are limited to
+`MODERATION_FLAGS_PER_MINUTE` (default 20); beyond that, flags are still audited
+but not posted, and the log says so once a minute. If the staff channel is
+missing, in another server, not a text channel or not writable, posting pauses
+for ten minutes with one warning and the bot keeps running.
+
+Buttons work for members with **Manage Messages** in the staff channel and keep
+working after a restart. The first decision wins; later clicks see who resolved
+it. The audit table stores message, channel and author IDs, rule, score, filter
+name, reason, rule revision, post ID, decision, decider and timestamps, never
+message text. Rows expire after `MODERATION_AUDIT_RETENTION_DAYS` (default 90)
+and the table is capped at `MODERATION_AUDIT_MAX_ROWS` (default 100000), oldest
+first. Existing databases are migrated to the new schema at startup.
 
 ## Persistent data
 
