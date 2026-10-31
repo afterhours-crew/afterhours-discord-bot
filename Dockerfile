@@ -28,6 +28,7 @@ WORKDIR /app
 COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=builder /app/.venv /app/.venv
 COPY .python-version pyproject.toml uv.lock README.md LICENSE THIRD-PARTY-NOTICES.md ./
+COPY rules/ ./rules/
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

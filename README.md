@@ -5,6 +5,8 @@ Nightshift is the Python Discord bot for the Afterhours community, managed entir
 commands: `/ping` checks the bot and `/about` links to its source. Replies are
 private to the person using the command.
 An optional activity feature maintains a role based on recent member messages.
+An optional moderation feature, off by default, prepares member messages for
+staff review against the community rules; see [Moderation](#moderation).
 
 The bot runs separately from the game, server and launcher. It requires Discord
 connectivity. This repository does not implement launcher Rich Presence.
@@ -77,8 +79,9 @@ uv sync --locked
 
 1. Create an application and bot in the
    [Discord Developer Portal](https://discord.com/developers/applications).
-   Leave Message Content and Presence privileged intents disabled. Server Members
-   Intent is needed only when enabling [Active roles](#active-roles).
+   Leave the Presence privileged intent disabled. Server Members Intent is needed
+   only when enabling [Active roles](#active-roles); Message Content Intent only
+   when enabling [Moderation](#moderation).
 2. Install it in your community server with the `bot` and `applications.commands`
    scopes. The starter needs no additional bot permissions; do not grant
    Administrator. Only server installation is used.
@@ -126,7 +129,8 @@ cursors and the small amount of activity metadata needed for the rolling count.
    Roles**, **View Channels** and **Read Message History** for the channels it
    should count.
 3. In the Developer Portal's **Bot** settings, enable **Server Members Intent**.
-   Keep **Message Content Intent** and **Presence Intent** disabled.
+   Keep **Presence Intent** disabled; **Message Content Intent** is needed only
+   for [Moderation](#moderation).
 4. Add these values to `.env`, replacing the example role ID:
 
    ```dotenv
@@ -184,6 +188,54 @@ per pass; remaining changes are deferred. Logs report scan counts, failures and 
 without member identities. A new live installation should be checked separately
 from the offline tests.
 
+## Moderation
+
+Nightshift can help staff enforce the community rules. This foundation receives
+member messages, filters out what is out of scope and queues the rest for review.
+No review layer exists yet, so nothing is flagged, deleted or announced; later
+versions add deterministic filters, an optional local language-model classifier
+and staff review posts. Every action will remain a staff decision.
+
+1. Create or choose a private **staff review channel**. With Developer Mode
+   enabled, copy its channel ID. Messages in that channel and its threads are
+   never reviewed.
+2. In the Developer Portal's **Bot** settings, enable **Message Content
+   Intent**. Without it Discord delivers messages with empty content and the bot
+   refuses to start with an error naming this setting.
+3. Add the channel ID to `.env`; the rule file and queue size have defaults:
+
+   ```dotenv
+   MODERATION_STAFF_CHANNEL_ID=123456789012345678
+   # MODERATION_RULES_PATH=rules/community-rules.md
+   # MODERATION_QUEUE_SIZE=1000
+   ```
+
+4. Check the configuration offline, which also reads the rule file, then rebuild
+   and recreate the service as for Active roles. Run `--sync-commands` once so
+   the new `/moderation` command is registered.
+
+The community rules live in [`rules/community-rules.md`](rules/community-rules.md),
+which ships in the repository and the image. At startup the text is normalized
+and saved in the SQLite configuration table with a revision that increases only
+when the content changes. Later review records will cite that revision, so edit
+the file, rebuild and restart to publish a new revision. Point
+`MODERATION_RULES_PATH` at another UTF-8 file (up to 64 KiB) to use a different
+text, for example from a mounted volume.
+
+`/moderation` is a staff command, visible by default to members with **Manage
+Messages**, and replies privately with the feature state, staff channel, rule
+revision, intent status and intake counters. It never shows message text,
+member identities or secrets.
+
+Only ordinary messages and replies from members in the configured server are
+queued; bots, webhooks, system messages, direct messages and the staff channel
+are skipped. The queue is bounded by `MODERATION_QUEUE_SIZE` (1–100000): when it
+is full new messages are dropped, counted and reported in the log at most once
+a minute, without content. Message text is held in memory only while queued and
+is never written to the database or the log. Enabling moderation adds the
+`guild_messages` and `message_content` intents and nothing else. Leaving
+`MODERATION_STAFF_CHANNEL_ID` empty keeps the bot exactly as before.
+
 ## Persistent data
 
 Docker Compose creates the named `nightshift-data` volume at `/data` for
@@ -213,9 +265,11 @@ uv build --no-sources
 ```
 
 CI runs these checks on Linux and Windows without tokens or Discord access.
-Tests cover configuration, server isolation, registration, error privacy and
-startup behavior. A real-server installation and slash-command run require an
-operator's Discord application and are a separate manual check.
+Tests cover configuration, server isolation, registration, error privacy,
+startup behavior, activity scans, rule revisions and the moderation intake. A
+real-server installation, slash-command run and message delivery with the
+Message Content intent require an operator's Discord application and are a
+separate manual check.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for repository rules and
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for dependency licenses.

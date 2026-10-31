@@ -13,6 +13,7 @@ import discord
 
 from afterhours_bot.bot import CommunityBot
 from afterhours_bot.config import ConfigurationError, Settings
+from afterhours_bot.rules import ModerationRulesError, load_rules
 from afterhours_bot.storage import ActivityStateError
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,17 @@ logger = logging.getLogger(__name__)
 async def run_bot(settings: Settings, *, sync_commands: bool) -> None:
     async with CommunityBot(settings, sync_commands=sync_commands) as bot:
         await bot.start(settings.token)
+
+
+def _intent_advice(settings: Settings) -> str:
+    needed = []
+    if settings.active_role is not None:
+        needed.append("Server Members Intent for Active roles")
+    if settings.moderation is not None:
+        needed.append("Message Content Intent for moderation")
+    if not needed:
+        return "Enable Server Members Intent in the Discord Developer Portal for Active roles."
+    return "Enable " + " and ".join(needed) + " in the Discord Developer Portal."
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -43,12 +55,25 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger("discord").setLevel(logging.WARNING)
     if args.check_config:
+        if settings.moderation is not None:
+            try:
+                rules = load_rules(settings.moderation.rules_path)
+            except ModerationRulesError as error:
+                parser.error(f"MODERATION_RULES_PATH: {error}")
+            logger.info(
+                "Moderation rules readable: %d bytes (%s).",
+                len(rules.text.encode("utf-8")),
+                rules.short_digest,
+            )
         logger.info("Configuration is valid; no connection was made.")
         return 0
     try:
         asyncio.run(run_bot(settings, sync_commands=args.sync_commands))
     except KeyboardInterrupt:
         return 0
+    except ModerationRulesError as error:
+        logger.error("Moderation rules could not be loaded: %s", error)
+        return 1
     except (sqlite3.Error, ActivityStateError) as error:
         logger.error(
             "Database initialization failed (%s). Check the database path, volume permissions "
@@ -57,9 +82,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     except discord.PrivilegedIntentsRequired:
-        logger.error(
-            "Enable Server Members Intent in the Discord Developer Portal for Active roles."
-        )
+        logger.error(_intent_advice(settings))
         return 1
     except discord.LoginFailure:
         logger.error("Discord authentication failed. Check DISCORD_TOKEN.")

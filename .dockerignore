@@ -10,6 +10,8 @@
 !THIRD-PARTY-NOTICES.md
 !src/
 !src/**
+!rules/
+!rules/**
 **/.env
 **/.env.*
 **/*.sqlite*
