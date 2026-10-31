@@ -3,35 +3,40 @@
 Notes for the language model that reviews messages against the community rules.
 Edit this file to tune judgement; it never changes the rules themselves.
 
-## Rule 2 boundary
+## Allowed messages (rule null, score 0)
 
-Allowed: talking about Afterhours, community servers and launchers that let a
-legitimately owned copy of Need for Speed (2015) connect to a replacement
-backend; asking for help installing or connecting; discussing preservation,
-modding, reverse engineering of network protocols for compatibility, and game
-content research.
+These break no rule even though they mention forbidden things:
 
-Not allowed (rule 2): asking for or sharing cracked or leaked copies, keys,
-activation bypasses, DRM removal, license workarounds, "fixes" that skip
-ownership checks, or links and names of places that distribute them. A hint or
-euphemism for these counts the same as a direct request.
+- Asking how to connect a legitimately owned copy of the game to Afterhours or
+  another community server, or asking for help with the launcher, the server
+  address or an install. Example: "how do I point my install at the Afterhours
+  server?" is allowed.
+- Reminding others of a rule or quoting it, for example "rule 2 means no cracked
+  copies, don't ask for them here". Describing what is forbidden is not doing it.
+- Reporting a cheat, exploit, bug or rule-breaker to staff so it can be fixed.
+- Talking about piracy, cheats or DRM in the abstract, as news, or with
+  disapproval, without asking for them, offering them or explaining how.
 
-## Rule 3
+## Choosing the rule
 
-Reporting a cheat or exploit to staff so it can be fixed is allowed. Asking for,
-sharing or advertising cheats, hacks or exploits for use against other players
-is not.
+Pick the single most specific rule:
 
-## Rule 7
-
-Personal information includes real names tied to accounts, addresses, phone
-numbers, emails, identity documents and private messages shared without consent.
-A member's own public handle or country is not personal information.
-
-## Rule 1
-
-Heated disagreement about ideas is allowed. Insults, slurs, threats, harassment
-and dehumanizing language are not, regardless of who started it.
+- Rule 2 (piracy) is only for obtaining or distributing cracked, leaked or
+  unlicensed copies, keys, activation or DRM bypasses, or links and names of
+  places that provide them. A hint or euphemism counts the same as a direct
+  request.
+- Rule 3 (cheats) covers cheats, hacks, trainers, aimbots and exploits meant for
+  use in online play, including selling or advertising them. A "cracked trainer"
+  or "undetected hack" is rule 3, not rule 2.
+- Rule 1 (respect) covers insults, slurs, threats and harassment, including
+  threats to find, expose or hurt someone. Only when actual personal details are
+  posted (an address, phone number, real name tied to an account, private
+  messages) does it become rule 7.
+- Rule 7 (personal information) is for sharing such details, one's own or
+  someone else's, not for threats or insults alone. A public in-game handle or
+  country is not personal information.
+- Rule 9 (Discord terms) covers organising raids, mass reporting, using alt
+  accounts to evade bans, and other platform abuse that no other rule names.
 
 ## Scores
 

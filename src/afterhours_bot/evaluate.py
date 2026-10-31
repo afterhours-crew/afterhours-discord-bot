@@ -55,7 +55,7 @@ class Report:
     correct: int = 0
     unavailable: int = 0
     per_rule: dict[int, RuleScore] = field(default_factory=dict)
-    mismatches: list[tuple[str, int | None, int | None]] = field(default_factory=list)
+    mismatches: list[tuple[str, int | None, int | None, float | None]] = field(default_factory=list)
 
     def render(self) -> str:
         lines = [
@@ -70,8 +70,9 @@ class Report:
                 f"(tp {score.true_positives}, fp {score.false_positives}, "
                 f"fn {score.false_negatives})"
             )
-        for example_id, expected, predicted in self.mismatches:
-            lines.append(f"Mismatch {example_id}: expected {expected}, got {predicted}")
+        for example_id, expected, predicted, verdict_score in self.mismatches:
+            detail = "no verdict" if verdict_score is None else f"score {verdict_score:.2f}"
+            lines.append(f"Mismatch {example_id}: expected {expected}, got {predicted} ({detail})")
         return "\n".join(lines)
 
 
@@ -113,12 +114,14 @@ async def evaluate_examples(
         if verdict is None:
             report.unavailable += 1
             predicted: int | None = None
+            verdict_score: float | None = None
         else:
             predicted = verdict.rule if verdict.score >= min_score else None
+            verdict_score = verdict.score
         if predicted == example.rule:
             report.correct += 1
         else:
-            report.mismatches.append((example.id, example.rule, predicted))
+            report.mismatches.append((example.id, example.rule, predicted, verdict_score))
         for rule in {value for value in (example.rule, predicted) if value is not None}:
             score = report.per_rule.get(rule, RuleScore())
             if predicted == example.rule == rule:
