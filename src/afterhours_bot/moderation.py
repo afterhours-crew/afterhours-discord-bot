@@ -29,6 +29,7 @@ class IntakeMessage:
     content: str
     jump_url: str = ""
     attachment_names: tuple[str, ...] = ()
+    author_manages_messages: bool = False
 
 
 def select_message(
@@ -47,6 +48,7 @@ def select_message(
         return None
     if getattr(channel, "parent_id", None) == settings.staff_channel_id:
         return None
+    permissions = getattr(message.author, "guild_permissions", None)
     return IntakeMessage(
         message_id=message.id,
         channel_id=channel.id,
@@ -55,6 +57,7 @@ def select_message(
         content=message.content,
         jump_url=message.jump_url,
         attachment_names=tuple(attachment.filename for attachment in message.attachments),
+        author_manages_messages=bool(permissions is not None and permissions.manage_messages),
     )
 
 

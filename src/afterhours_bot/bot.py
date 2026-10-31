@@ -16,10 +16,11 @@ from afterhours_bot.activity_service import (
     IncompleteActivityScan,
     reconcile_active_role,
 )
+from afterhours_bot.classifier import Classifier
 from afterhours_bot.config import Settings
 from afterhours_bot.moderation import ModerationIntake, select_message
 from afterhours_bot.review import ReviewView, StaffReviewer
-from afterhours_bot.rules import load_rules
+from afterhours_bot.rules import ModerationRulesError, RuleSet, load_rules
 from afterhours_bot.storage import ActivityStateError, ActivityStore
 
 logger = logging.getLogger(__name__)
@@ -73,15 +74,26 @@ class CommunityBot(discord.Client):
         self.store = ActivityStore(settings.database_path)
         self.rules_revision: int | None = None
         self.rules_digest: str | None = None
+        self.rules: RuleSet | None = None
+        self.guidance: RuleSet | None = None
         self.reviewer: StaffReviewer | None = None
         self.moderation: ModerationIntake | None = None
+        self.classifier: Classifier | None = None
         if settings.moderation is not None:
+            if settings.moderation.llm is not None:
+                self.classifier = Classifier(
+                    settings.moderation.llm,
+                    rules_text=lambda: self.rules.text if self.rules is not None else None,
+                    rule_numbers=lambda: self.rules.numbers if self.rules is not None else (),
+                    guidance_text=lambda: self.guidance.text if self.guidance is not None else None,
+                )
             self.reviewer = StaffReviewer(
                 self,
                 settings.moderation,
                 self.store,
                 guild_id=settings.guild_id,
                 rules_revision=lambda: self.rules_revision,
+                classifier=self.classifier,
             )
             self.moderation = ModerationIntake(settings.moderation, reviewer=self.reviewer.review)
         guild = discord.Object(id=settings.guild_id)
@@ -145,7 +157,21 @@ class CommunityBot(discord.Client):
             f"Flags: {review.flagged} flagged, {review.posted} posted, "
             f"{review.suppressed} rate limited, {review.unposted} unposted, "
             f"{review.decisions} decided this run; staff posting {posting}.\n"
-            f"Audit: {stored} stored flags, {open_flags} awaiting a decision."
+            f"Audit: {stored} stored flags, {open_flags} awaiting a decision.\n"
+            f"Classifier: {self.classifier_status()}"
+        )
+
+    def classifier_status(self) -> str:
+        llm = self.settings.moderation.llm if self.settings.moderation is not None else None
+        if llm is None or self.classifier is None:
+            return "off (set MODERATION_LLM_URL and MODERATION_LLM_MODEL to enable)."
+        counts = self.classifier.counters
+        state = "available" if self.classifier.available else "unavailable (circuit open)"
+        guidance = "with guidance" if self.guidance is not None else "without guidance"
+        return (
+            f"{state}, model {llm.model} {guidance}; {counts.requests} answers, "
+            f"{counts.verdicts} verdicts, {counts.invalid} off-schema, "
+            f"{counts.failures} failures, {counts.skipped_open} skipped while open."
         )
 
     async def setup_hook(self) -> None:
@@ -158,11 +184,20 @@ class CommunityBot(discord.Client):
                 self.settings.guild_id, rules, as_of=datetime.now(UTC)
             )
             self.rules_digest = rules.sha256
+            self.rules = rules
             logger.info(
                 "Moderation rules loaded: revision %d (%s).",
                 self.rules_revision,
                 rules.short_digest,
             )
+            llm = self.settings.moderation.llm
+            if llm is not None and llm.guidance_path is not None:
+                try:
+                    self.guidance = await asyncio.to_thread(load_rules, llm.guidance_path)
+                except ModerationRulesError as error:
+                    logger.warning("Classifier guidance not loaded: %s", error)
+                else:
+                    logger.info("Classifier guidance loaded (%s).", self.guidance.short_digest)
         if self.sync_commands:
             commands = await self.tree.sync(guild=discord.Object(id=self.settings.guild_id))
             logger.info("Registered %d community commands.", len(commands))
@@ -227,6 +262,8 @@ class CommunityBot(discord.Client):
         self._activity_task = None
         self._moderation_task = None
         try:
+            if self.classifier is not None:
+                await self.classifier.close()
             await self.store.close()
         finally:
             await super().close()

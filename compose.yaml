@@ -27,5 +27,19 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Optional local language model for moderation review. Uncomment this service
+  # and the ollama-models volume, then pull a model (see README, Language-model
+  # review) and set MODERATION_LLM_URL=http://ollama:11434/v1 in .env. Pulling a
+  # model accepts that model's own license. For NVIDIA GPUs add the deploy
+  # section documented by Docker; without it the model runs on the CPU.
+  # ollama:
+  #   image: ollama/ollama:0.12.3
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ollama-models:/root/.ollama
+  #   expose:
+  #     - "11434"
+
 volumes:
   nightshift-data:
+  # ollama-models:

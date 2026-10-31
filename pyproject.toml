@@ -8,11 +8,13 @@ license = "MPL-2.0"
 license-files = ["LICENSE", "THIRD-PARTY-NOTICES.md"]
 authors = [{ name = "Afterhours Crew" }]
 dependencies = [
+    "aiohttp==3.14.5",
     "discord-py==2.7.1",
 ]
 
 [project.scripts]
 afterhours-bot = "afterhours_bot.__main__:main"
+afterhours-bot-evaluate = "afterhours_bot.evaluate:main"
 
 [build-system]
 requires = ["uv_build==0.12.9"]
