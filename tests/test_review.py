@@ -17,10 +17,13 @@ from afterhours_bot.config import DenyEntry, ModerationSettings
 from afterhours_bot.filters import Flag
 from afterhours_bot.moderation import IntakeMessage
 from afterhours_bot.review import (
+    LinkView,
     ReviewCounters,
     ReviewView,
     StaffReviewer,
-    format_post,
+    build_embed,
+    excerpt,
+    resolve_embed,
 )
 from afterhours_bot.storage import ActivityStateError, ActivityStore
 
@@ -78,7 +81,7 @@ def interaction(
 ) -> Mock:
     result = Mock()
     result.guild_id = guild_id
-    result.message = Mock(id=post_id, content="**Review needed**")
+    result.message = Mock(id=post_id, content="", embeds=[])
     result.permissions = discord.Permissions(manage_messages=manage_messages)
     result.user = Mock(id=user_id)
     result.response.send_message = AsyncMock()
@@ -91,15 +94,52 @@ def interaction(
 # Post text
 
 
-def test_post_text_names_rule_reason_link_and_revision_but_never_message_text() -> None:
-    text = format_post(intake(1), FLAGS, 7)
-    assert "Rule 2: 1 link to listed domain bad.example (confidence 0.90, link-domain)" in text
-    assert "https://discord.com/channels/123/10/1" in text
-    assert "<@42>" in text and "<#10>" in text
-    assert "rules revision 7" in text
-    assert "shadow mode" in text
-    assert "secret-path" not in text
-    assert "rules unknown" in format_post(intake(1), FLAGS, None)
+def test_post_embed_quotes_the_message_and_names_rule_reason_and_place() -> None:
+    embed = build_embed(intake(1), FLAGS, 7, {2: "No piracy"})
+    assert embed.title == "Rule 2 · No piracy"
+    assert embed.url == "https://discord.com/channels/123/10/1"
+    assert embed.description == "> see https://bad.example/secret-path-1"
+    fields = {field.name: field.value for field in embed.fields}
+    assert fields["Author"] == "<@42>" and fields["Channel"] == "<#10>"
+    assert fields["Confidence"] == "90% (0.90) · link-domain"
+    assert fields["Why"] == "1 link to listed domain bad.example (rule 2, score 0.90, link-domain)"
+    assert "Details" in fields
+    detailed = build_embed(
+        intake(1), FLAGS, 7, {}, flagged_at=NOW, models={"link-domain": "n/a", "llm": "qwen"}
+    )
+    details = {field.name: field.value for field in detailed.fields}["Details"].splitlines()
+    assert details[0] == "Score 0.90 · source link-domain (n/a)"
+    assert details[1] == "Message 1 · author 42 · channel 10"
+    assert details[2].startswith("Sent <t:") and "flagged <t:" in details[2]
+    assert details[3] == "Rules revision 7"
+    assert embed.footer.text == "rules revision 7 · nothing done automatically"
+    assert embed.color is not None and embed.color.value == 0xE74C3C
+    hidden = build_embed(intake(1), FLAGS, None, {}, show_excerpt=False)
+    assert hidden.description == "*(no text)*" and hidden.title == "Rule 2"
+    assert hidden.footer.text is not None and hidden.footer.text.startswith("rules unknown")
+
+
+def test_excerpt_is_quoted_capped_and_mention_safe() -> None:
+    assert (
+        excerpt("hi @everyone\n\nsecond <@123456789012345678>")
+        == "> hi @\u200beveryone\n>\n> second <@\u200b123456789012345678>"
+    )
+    long = excerpt("x" * 2000)
+    assert long.startswith("> ") and long.endswith("…") and len(long) <= 1003
+    assert excerpt("   ") == ""
+
+
+def test_resolve_embed_marks_the_decision_and_outcome() -> None:
+    from afterhours_bot.actions import Outcome
+
+    embed = resolve_embed(build_embed(intake(1), FLAGS, 7, {}), "dismiss", 7, None)
+    assert embed.fields[-1].name == "Resolved" and embed.fields[-1].value == "Dismissed by <@7>"
+    assert embed.color is not None and embed.color.value == 0x2ECC71
+    acted = resolve_embed(build_embed(intake(1), FLAGS, 7, {}), "delete", 8, Outcome(True, "gone"))
+    assert acted.fields[-1].value == "Delete by <@8>\ngone"
+    assert acted.color is not None and acted.color.value == 0x3498DB
+    failed = resolve_embed(build_embed(intake(1), FLAGS, 7, {}), "warn", 8, Outcome(False, "no"))
+    assert failed.color is not None and failed.color.value == 0xD35400
 
 
 # Posting and audit
@@ -120,7 +160,10 @@ def test_flagged_messages_are_posted_and_audited_without_content(
         assert isinstance(kwargs["view"], ReviewView)
         assert kwargs["silent"] is True
         assert kwargs["allowed_mentions"].to_dict() == {"parse": []}
-        assert "secret-path" not in channel.send.call_args.args[0]
+        assert channel.send.call_args.args == ()
+        assert "secret-path-2" in kwargs["embed"].description  # Quoted for staff, by design.
+        links = [item for item in kwargs["view"].children if isinstance(item, discord.ui.Button)]
+        assert links[-1].url == "https://discord.com/channels/123/10/2"
         assert instance.counters == ReviewCounters(flagged=1, posted=1)
         assert await store.flag_summary(123) == (1, 1)
 
@@ -214,8 +257,8 @@ def test_dismiss_records_the_decision_and_removes_the_buttons(store: ActivitySto
         await instance.decide(click, "dismiss")
         click.response.edit_message.assert_awaited_once()
         kwargs = click.response.edit_message.call_args.kwargs
-        assert kwargs["view"] is None
-        assert kwargs["content"].endswith("**Resolved:** dismiss by <@7>")
+        assert isinstance(kwargs["view"], LinkView)
+        assert kwargs["embed"].fields[-1].value == "Dismissed by <@7>"
         click.followup.send.assert_not_awaited()
         assert instance.counters.decisions == 1
         assert await store.flag_summary(123) == (1, 0)
@@ -237,8 +280,8 @@ def test_other_decisions_are_recorded_and_report_when_the_action_cannot_run(
         click.permissions = discord.Permissions(manage_messages=True, moderate_members=True)
         await instance.decide(click, decision)
         click.response.edit_message.assert_awaited_once()
-        content = click.response.edit_message.call_args.kwargs["content"]
-        assert content.endswith(f"**Resolved:** {decision} by <@7> — the server is unavailable")
+        resolved = click.response.edit_message.call_args.kwargs["embed"].fields[-1].value
+        assert resolved == f"{decision.capitalize()} by <@7>\nthe server is unavailable"
         click.followup.send.assert_awaited_once_with(
             "Not done: the server is unavailable.", ephemeral=True
         )

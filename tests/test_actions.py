@@ -328,7 +328,7 @@ def staff_channel() -> Mock:
 def interaction(*, permissions: discord.Permissions, user_id: int = 7) -> Mock:
     result = Mock()
     result.guild_id = 123
-    result.message = Mock(id=9001, content="**Review needed**")
+    result.message = Mock(id=9001, content="", embeds=[])
     result.permissions = permissions
     result.user = Mock(id=user_id)
     result.response.send_message = AsyncMock()
@@ -381,8 +381,8 @@ def test_delete_button_deletes_records_the_outcome_and_edits_the_post(
         click = interaction(permissions=discord.Permissions(manage_messages=True))
         await review.decide(click, "delete")
         g.get_channel_or_thread.return_value.fetch_message.return_value.delete.assert_awaited_once()
-        content = click.response.edit_message.call_args.kwargs["content"]
-        assert content.endswith("**Resolved:** delete by <@7> — message deleted")
+        resolved = click.response.edit_message.call_args.kwargs["embed"].fields[-1]
+        assert (resolved.name, resolved.value) == ("Resolved", "Delete by <@7>\nmessage deleted")
         click.followup.send.assert_awaited_once_with("Done: message deleted.", ephemeral=True)
         assert review.counters.decisions == 1 and review.counters.actions == 1
 
@@ -407,7 +407,7 @@ def test_warn_and_timeout_buttons_act_and_report(store: ActivityStore) -> None:
         review.client.get_channel.return_value.send.return_value = Mock(id=9002)
         await review.review(flagged(2))
         timeout = interaction(permissions=discord.Permissions(moderate_members=True))
-        timeout.message = Mock(id=9002, content="post")
+        timeout.message = Mock(id=9002, content="", embeds=[])
         await review.decide(timeout, "timeout")
         target_member.timeout.assert_awaited_once()
         assert "Done: timed out for 15 minutes." in timeout.followup.send.call_args.args[0]
@@ -428,8 +428,8 @@ def test_timeout_button_needs_moderate_members_and_failures_are_reported(
         assert "Moderate Members" in denied.response.send_message.call_args.args[0]
         warn = interaction(permissions=discord.Permissions(manage_messages=True))
         await review.decide(warn, "warn")
-        content = warn.response.edit_message.call_args.kwargs["content"]
-        assert "— the member does not accept direct messages" in content
+        resolved = warn.response.edit_message.call_args.kwargs["embed"].fields[-1].value
+        assert resolved == "Warn by <@7>\nthe member does not accept direct messages"
         warn.followup.send.assert_awaited_once_with(
             "Not done: the member does not accept direct messages.", ephemeral=True
         )
@@ -452,10 +452,8 @@ def test_expired_buttons_do_not_act(store: ActivityStore) -> None:
         click = interaction(permissions=discord.Permissions(manage_messages=True))
         await review.decide(click, "delete")
         g.get_channel_or_thread.return_value.fetch_message.assert_not_awaited()
-        assert (
-            "buttons expire after 2 hours"
-            in click.response.edit_message.call_args.kwargs["content"]
-        )
+        resolved = click.response.edit_message.call_args.kwargs["embed"].fields[-1].value
+        assert "buttons expire after 2 hours" in resolved
         late_dismiss = reviewer(store)[0]
         late_dismiss.clock = lambda: NOW + timedelta(hours=3)
         await late_dismiss.review(flagged(2))
@@ -472,7 +470,8 @@ def test_dismiss_still_resolves_without_an_action(store: ActivityStore) -> None:
         click.followup.send.assert_not_awaited()
         target_member.send.assert_not_awaited()
         g.get_channel_or_thread.return_value.fetch_message.assert_not_awaited()
-        assert click.response.edit_message.call_args.kwargs["content"].endswith("dismiss by <@7>")
+        resolved = click.response.edit_message.call_args.kwargs["embed"].fields[-1].value
+        assert resolved == "Dismissed by <@7>"
 
     asyncio.run(scenario())
 

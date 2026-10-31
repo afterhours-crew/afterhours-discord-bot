@@ -147,6 +147,7 @@ class ModerationSettings:
     button_expiry_hours: int = 72
     warn_template: str = DEFAULT_WARN_TEMPLATE
     auto_actions: tuple[AutoAction, ...] = ()
+    post_excerpt: bool = True
 
 
 def _template(env: Mapping[str, str], name: str, default: str) -> str:
@@ -344,6 +345,7 @@ class Settings:
                 ),
                 warn_template=_template(env, "MODERATION_WARN_TEMPLATE", DEFAULT_WARN_TEMPLATE),
                 auto_actions=_auto_actions(env, "MODERATION_AUTO_ACTIONS"),
+                post_excerpt=_flag(env, "MODERATION_POST_EXCERPT", "true"),
             )
             if raw_staff_channel
             else None

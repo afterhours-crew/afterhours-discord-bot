@@ -273,10 +273,17 @@ Each filter maps to a rule number from the rule file:
 
 ### Review posts and audit
 
-A flag posts to the staff channel with the rule number, the filter's reason, a
-confidence value, the filter name, a jump link to the message, the author and
-channel mentions (never pinged) and the rule revision. The post does not quote
-the message; staff read it through the link. Posts are limited to
+A flag posts to the staff channel as an embed: the rule number and title, the
+message text quoted in place (and a preview of its first image), the author
+and channel (never pinged), the confidence, the reason, the rule revision in
+the footer, an **Open message** link button and the action buttons. Set
+`MODERATION_POST_EXCERPT=false` to leave the text out and rely on the link; the
+quote is a copy that Discord keeps in the staff channel, so decide with your
+privacy expectations in mind. The audit database never stores the text either
+way. When a flagged message is edited, the post is updated to show the new
+text with the original kept in an "Original" field and an "Edited" marker; a
+deleted message keeps its quote. Resolved posts change colour and gain a
+"Resolved" field. Posts are limited to
 `MODERATION_FLAGS_PER_MINUTE` (default 20); beyond that, flags are still audited
 but not posted, and the log says so once a minute. If the staff channel is
 missing, in another server, not a text channel or not writable, posting pauses

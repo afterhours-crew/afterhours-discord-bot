@@ -30,7 +30,7 @@ from afterhours_bot.config import (
     Settings,
 )
 from afterhours_bot.moderation import IntakeMessage, select_message
-from afterhours_bot.review import StaffReviewer
+from afterhours_bot.review import LinkView, ReviewView, StaffReviewer
 from afterhours_bot.rules import load_rules, parse_rules
 from afterhours_bot.storage import ActivityStore
 
@@ -290,7 +290,9 @@ def intake(number: int, content: str, **overrides: object) -> IntakeMessage:
 # Edited messages
 
 
-def test_an_edited_message_that_was_already_flagged_keeps_its_post(store: ActivityStore) -> None:
+def test_an_edited_message_that_was_already_flagged_keeps_and_updates_its_post(
+    store: ActivityStore,
+) -> None:
     settings = ModerationSettings(
         555, repeat_threshold=50, link_denylist=(DenyEntry("bad.example", 2),)
     )
@@ -298,11 +300,27 @@ def test_an_edited_message_that_was_already_flagged_keeps_its_post(store: Activi
     async def scenario() -> None:
         review, channel, _ = make_reviewer(store, settings)
         await review.review(intake(1, "see https://bad.example/x"))
+        posted = Mock(spec=discord.Message)
+        posted.embeds = [channel.send.call_args.kwargs["embed"]]
+        posted.edit = AsyncMock()
+        channel.fetch_message = AsyncMock(return_value=posted)
         await review.review(intake(1, "see https://bad.example/x discord.gg/abc", edited=True))
         assert channel.send.await_count == 1
         assert review.counters.reflagged == 1
         count, post = await store.message_flags(123, 1)
         assert (count, post) == (2, 9001)
+        channel.fetch_message.assert_awaited_with(9001)
+        embed = posted.edit.call_args.kwargs["embed"]
+        fields = {field.name: field.value for field in embed.fields}
+        assert embed.description == "> see https://bad.example/x discord.gg/abc"
+        assert fields["Original"] == "> see https://bad.example/x"
+        assert fields["Edited"].startswith("edited <t:") and "invite" in fields["Edited"]
+        await review.review(intake(1, "all clean now", edited=True))
+        embed = posted.edit.call_args.kwargs["embed"]
+        names = [field.name for field in embed.fields]
+        assert names.count("Original") == 1 and names.count("Edited") == 1
+        assert "find nothing" in embed.fields[-1].value
+        assert embed.description == "> all clean now"
         await review.review(intake(2, "clean then edited to discord.gg/abc", edited=True))
         assert channel.send.await_count == 2  # Previously clean message gets a post.
 
@@ -371,8 +389,12 @@ def test_images_go_to_the_vision_model_as_image_parts(store: ActivityStore) -> N
         parts = endpoint.requests[1]["messages"][1]["content"]  # type: ignore[index]
         assert parts[0]["type"] == "text" and "attached images" in parts[0]["text"]
         assert parts[1] == {"type": "image_url", "image_url": {"url": "https://cdn.example/a.png"}}
-        post = channel.send.call_args.args[0]
-        assert "Rule 5: model (image): explicit image (confidence 0.95, llm-image)" in post
+        embed = channel.send.call_args.kwargs["embed"]
+        why = {field.name: field.value for field in embed.fields}["Why"]
+        assert why == "model (image): explicit image (rule 5, score 0.95, llm-image)"
+        details = {field.name: field.value for field in embed.fields}["Details"]
+        assert "source llm-image (vision-model)" in details
+        assert embed.image.url == "https://cdn.example/a.png"
 
     run_with_server(endpoint, scenario)
 
@@ -415,9 +437,10 @@ def test_configured_automatic_action_runs_posts_without_buttons_and_is_audited(
         await review.review(intake(1, "join discord.gg/abc"))
         guild.get_channel_or_thread.return_value.fetch_message.return_value.delete.assert_awaited_once()
         kwargs = channel.send.call_args.kwargs
-        assert kwargs["view"] is discord.utils.MISSING
-        text = channel.send.call_args.args[0]
-        assert "**Automatic:** delete (invite, rule 6) — message deleted" in text
+        assert isinstance(kwargs["view"], LinkView)
+        fields = {field.name: field.value for field in kwargs["embed"].fields}
+        assert fields["Automatic action"] == "delete (invite, rule 6): message deleted"
+        assert kwargs["embed"].footer.text.endswith("automatic action taken")
         assert review.counters.automatic == 1 and review.counters.actions == 1
         assert await store.flag_summary(123) == (1, 0)
 
@@ -445,7 +468,7 @@ def test_automatic_actions_skip_staff_and_unmatched_flags(store: ActivityStore) 
         await review.review(intake(1, "discord.gg/abc"))  # Score 0.6 below 0.9: no action.
         await review.review(intake(2, "https://bad.example/x", author_manages_messages=True))
         assert review.counters.automatic == 0
-        assert channel.send.call_args_list[0].kwargs["view"] is not discord.utils.MISSING
+        assert isinstance(channel.send.call_args_list[0].kwargs["view"], ReviewView)
         await review.review(intake(3, "https://bad.example/y"))
         guild.get_member.return_value.send.assert_awaited_once()
         assert review.counters.automatic == 1
