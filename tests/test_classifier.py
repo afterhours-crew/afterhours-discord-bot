@@ -217,7 +217,7 @@ def test_prompt_contains_rules_guidance_and_capped_content() -> None:
     messages = build_messages(RULES.text, GUIDANCE.text, "z" * 50, 10)
     assert [message["role"] for message in messages] == ["system", "user"]
     assert "# 2. No piracy" in messages[0]["content"]
-    assert "Rule 2 boundary" in messages[0]["content"]
+    assert "Choosing the rule" in messages[0]["content"]
     assert "untrusted member" in messages[0]["content"]
     assert messages[1]["content"].count("z") == 10
     without = build_messages(RULES.text, None, "x", 10)
@@ -568,7 +568,8 @@ def test_evaluation_reports_precision_recall_and_mismatches() -> None:
         assert [m[0] for m in report.mismatches] == ["fn", "fp", "low", "down"]
         text = report.render()
         assert "Rule 2: precision 0.50, recall 0.50 (tp 1, fp 1, fn 1)" in text
-        assert "Mismatch fn: expected 2, got None" in text
+        assert "Mismatch fn: expected 2, got None (score 0.00)" in text
+        assert "Mismatch down: expected 3, got None (no verdict)" in text
         assert "crack please" not in text
 
     run_with_server(endpoint, scenario)
