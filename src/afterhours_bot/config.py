@@ -6,6 +6,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from string import Formatter
 from urllib.parse import urlsplit
 
 
@@ -75,6 +76,15 @@ class LlmSettings:
     skip_staff: bool = True
 
 
+DEFAULT_WARN_TEMPLATE = (
+    "Hello. Staff of {server} reviewed a message of yours in {channel} and found that it "
+    "breaks rule {rule} ({title}). Please read the server rules again before posting. "
+    "This is an automated notice sent on a staff decision; reply to staff in the server "
+    "if you think it was a mistake."
+)
+WARN_PLACEHOLDERS = frozenset({"server", "channel", "rule", "title"})
+
+
 @dataclass(frozen=True)
 class ModerationSettings:
     """Review is enabled by naming the staff channel; it needs the Message Content intent."""
@@ -90,6 +100,24 @@ class ModerationSettings:
     audit_max_rows: int = 100_000
     flags_per_minute: int = 20
     llm: LlmSettings | None = None
+    timeout_minutes: int = 60
+    button_expiry_hours: int = 72
+    warn_template: str = DEFAULT_WARN_TEMPLATE
+
+
+def _template(env: Mapping[str, str], name: str, default: str) -> str:
+    raw = env.get(name, default).strip() or default
+    if len(raw) > 1500:
+        raise ConfigurationError(f"{name} must be at most 1500 characters.")
+    try:
+        fields = {field_name for _, field_name, _, _ in Formatter().parse(raw) if field_name}
+    except ValueError:
+        raise ConfigurationError(f"{name} has unbalanced braces.") from None
+    if not fields <= WARN_PLACEHOLDERS:
+        raise ConfigurationError(
+            f"{name} may only use the placeholders " + ", ".join(sorted(WARN_PLACEHOLDERS)) + "."
+        )
+    return raw
 
 
 def _file_path(env: Mapping[str, str], name: str, default: str) -> Path:
@@ -255,6 +283,11 @@ class Settings:
                 ),
                 flags_per_minute=_positive_integer(env, "MODERATION_FLAGS_PER_MINUTE", 20, 600),
                 llm=parse_llm_settings(env),
+                timeout_minutes=_positive_integer(env, "MODERATION_TIMEOUT_MINUTES", 60, 40_320),
+                button_expiry_hours=_positive_integer(
+                    env, "MODERATION_BUTTON_EXPIRY_HOURS", 72, 8760
+                ),
+                warn_template=_template(env, "MODERATION_WARN_TEMPLATE", DEFAULT_WARN_TEMPLATE),
             )
             if raw_staff_channel
             else None

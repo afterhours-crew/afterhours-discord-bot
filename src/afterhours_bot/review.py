@@ -6,12 +6,13 @@
 import asyncio
 import logging
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import discord
 
+from afterhours_bot.actions import ActionExecutor, ActionTarget, Outcome
 from afterhours_bot.classifier import Classifier
 from afterhours_bot.config import ModerationSettings
 from afterhours_bot.filters import Flag, RepeatTracker, evaluate
@@ -24,10 +25,6 @@ POSTING_RETRY_SECONDS = 600.0
 LOG_INTERVAL_SECONDS = 60.0
 CUSTOM_ID_PREFIX = "nightshift:review:"
 DECISIONS = ("dismiss", "delete", "warn", "timeout")
-DEFERRED_ACTION_NOTE = (
-    "Recorded. Nightshift does not perform this action yet; please do it manually. "
-    "Automatic actions arrive in a later version."
-)
 
 type StaffChannel = discord.TextChannel | discord.Thread
 
@@ -43,6 +40,7 @@ class ReviewCounters:
     suppressed: int = 0
     unposted: int = 0
     decisions: int = 0
+    actions: int = 0
 
 
 def format_post(message: IntakeMessage, flags: tuple[Flag, ...], rules_revision: int | None) -> str:
@@ -72,6 +70,7 @@ class StaffReviewer:
         rules_revision: Callable[[], int | None],
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         classifier: Classifier | None = None,
+        rule_titles: Callable[[], Mapping[int, str]] = lambda: {},
     ) -> None:
         self.client = client
         self.settings = settings
@@ -80,6 +79,7 @@ class StaffReviewer:
         self.rules_revision = rules_revision
         self.clock = clock
         self.classifier = classifier
+        self.executor = ActionExecutor(client, settings, guild_id=guild_id, rule_titles=rule_titles)
         self.tracker = RepeatTracker(settings.repeat_window_seconds, settings.repeat_threshold)
         self._counters = ReviewCounters()
         self._recent_posts: deque[float] = deque()
@@ -193,25 +193,33 @@ class StaffReviewer:
         self._counters = replace(self._counters, posted=self._counters.posted + 1)
         return post.id
 
+    def _allowed(self, interaction: discord.Interaction, decision: str) -> bool:
+        permissions = interaction.permissions
+        if decision == "timeout":
+            return bool(permissions.moderate_members)
+        return bool(permissions.manage_messages)
+
     async def decide(self, interaction: discord.Interaction, decision: str) -> None:
-        """Handle a button click: staff only, idempotent, audited; actions beyond Dismiss wait."""
+        """Handle a button click: staff only, first decision wins, action performed and audited."""
         if decision not in DECISIONS:
             raise ValueError("Unknown review decision.")
         if (
             interaction.guild_id != self.guild_id
             or interaction.message is None
-            or not interaction.permissions.manage_messages
+            or not self._allowed(interaction, decision)
         ):
+            needed = "Moderate Members" if decision == "timeout" else "Manage Messages"
             await interaction.response.send_message(
-                "Only staff with Manage Messages can resolve review posts.", ephemeral=True
+                f"Only staff with {needed} can use this button.", ephemeral=True
             )
             return
+        now = self.clock()
         result = await self.store.record_decision(
             self.guild_id,
             interaction.message.id,
             decision=decision,
             decider_id=interaction.user.id,
-            as_of=self.clock(),
+            as_of=now,
         )
         if result is None:
             await interaction.response.send_message(
@@ -219,21 +227,39 @@ class StaffReviewer:
             )
             return
         if result.already_decided:
+            note = f" ({result.outcome})" if result.outcome else ""
             await interaction.response.send_message(
-                f"Already resolved as {result.decision} by <@{result.decider_id}>.",
+                f"Already resolved as {result.decision} by <@{result.decider_id}>{note}.",
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
         self._counters = replace(self._counters, decisions=self._counters.decisions + 1)
+        age = now - datetime.fromtimestamp(result.created_us / 1_000_000, tz=UTC)
+        if decision != "dismiss" and age > timedelta(hours=self.settings.button_expiry_hours):
+            outcome = Outcome(
+                False,
+                f"buttons expire after {self.settings.button_expiry_hours} hours; act manually",
+            )
+        else:
+            target = ActionTarget(
+                result.message_id, result.channel_id, result.author_id, result.rules
+            )
+            outcome = await self.executor.perform(decision, target)
+        await self.store.record_outcome(self.guild_id, interaction.message.id, outcome.summary)
+        if outcome.ok:
+            self._counters = replace(self._counters, actions=self._counters.actions + 1)
+        status = "" if decision == "dismiss" else f" — {outcome.summary}"
         content = (
-            f"{interaction.message.content}\n**Resolved:** {decision} by <@{interaction.user.id}>"
+            f"{interaction.message.content}\n**Resolved:** {decision} by "
+            f"<@{interaction.user.id}>{status}"
         )
         await interaction.response.edit_message(
             content=content, view=None, allowed_mentions=discord.AllowedMentions.none()
         )
         if decision != "dismiss":
-            await interaction.followup.send(DEFERRED_ACTION_NOTE, ephemeral=True)
+            prefix = "Done:" if outcome.ok else "Not done:"
+            await interaction.followup.send(f"{prefix} {outcome.summary}.", ephemeral=True)
 
 
 class ReviewView(discord.ui.View):

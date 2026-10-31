@@ -94,6 +94,7 @@ class CommunityBot(discord.Client):
                 guild_id=settings.guild_id,
                 rules_revision=lambda: self.rules_revision,
                 classifier=self.classifier,
+                rule_titles=lambda: self.rules.titles if self.rules is not None else {},
             )
             self.moderation = ModerationIntake(settings.moderation, reviewer=self.reviewer.review)
         guild = discord.Object(id=settings.guild_id)
@@ -156,7 +157,8 @@ class CommunityBot(discord.Client):
             f"{counters.failed} failed, {counters.pending} pending.\n"
             f"Flags: {review.flagged} flagged, {review.posted} posted, "
             f"{review.suppressed} rate limited, {review.unposted} unposted, "
-            f"{review.decisions} decided this run; staff posting {posting}.\n"
+            f"{review.decisions} decided, {review.actions} actions done this run; "
+            f"staff posting {posting}.\n"
             f"Audit: {stored} stored flags, {open_flags} awaiting a decision.\n"
             f"Classifier: {self.classifier_status()}"
         )
