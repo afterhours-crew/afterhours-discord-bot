@@ -61,10 +61,20 @@ def main(argv: list[str] | None = None) -> int:
             except ModerationRulesError as error:
                 parser.error(f"MODERATION_RULES_PATH: {error}")
             logger.info(
-                "Moderation rules readable: %d bytes (%s).",
+                "Moderation rules readable: %d bytes (%s), rules %s.",
                 len(rules.text.encode("utf-8")),
                 rules.short_digest,
+                ", ".join(str(number) for number in rules.numbers) or "none",
             )
+            llm = settings.moderation.llm
+            if llm is not None:
+                guidance = "no guidance file"
+                if llm.guidance_path is not None:
+                    try:
+                        guidance = f"guidance {load_rules(llm.guidance_path).short_digest}"
+                    except ModerationRulesError as error:
+                        guidance = f"guidance not readable ({error})"
+                logger.info("Classifier configured: model %s, %s.", llm.model, guidance)
         logger.info("Configuration is valid; no connection was made.")
         return 0
     try:

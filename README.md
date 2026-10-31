@@ -196,7 +196,8 @@ review channel with Dismiss, Delete, Warn and Timeout buttons. This is **shadow
 mode**: the bot only reports and records; it never deletes, warns, times out or
 announces on its own. Dismiss resolves a post; the other buttons record the
 staff decision and ask you to act manually until a later version performs them.
-A local language-model review layer comes later.
+An optional local language model reviews what the filters let through; see
+[Language-model review](#language-model-review).
 
 Use Discord's built-in **AutoMod** (Server Settings → AutoMod) as the first
 layer: keyword and regex lists, mention spam, suspected spam and known malicious
@@ -278,6 +279,68 @@ name, reason, rule revision, post ID, decision, decider and timestamps, never
 message text. Rows expire after `MODERATION_AUDIT_RETENTION_DAYS` (default 90)
 and the table is capped at `MODERATION_AUDIT_MAX_ROWS` (default 100000), oldest
 first. Existing databases are migrated to the new schema at startup.
+
+### Language-model review
+
+Messages that pass the deterministic filters can be judged by a language model
+you run yourself. Nightshift talks to any **OpenAI-compatible chat completions
+API**, which Ollama, llama.cpp's server and LM Studio all provide, so the model is
+a configuration choice. The model's answer is a flag at most: it goes to the
+staff channel like any other flag, in shadow mode, and never reaches members.
+
+1. Run a model server reachable from the bot. With Ollama on the same Docker
+   host, uncomment the `ollama` service in `compose.yaml`, start it and pull an
+   instruct model that follows JSON instructions, for example
+   `docker compose exec ollama ollama pull qwen2.5:7b-instruct`. You accept the
+   model's own license when you pull it; record it in THIRD-PARTY-NOTICES.md if
+   you ship it with your deployment. A 7–8B model needs roughly 6 GB of GPU or
+   system memory and answers in a few seconds on a GPU, tens of seconds on CPU.
+2. Set the endpoint and model in `.env`:
+
+   ```dotenv
+   MODERATION_LLM_URL=http://ollama:11434/v1
+   MODERATION_LLM_MODEL=qwen2.5:7b-instruct
+   ```
+
+   `MODERATION_LLM_API_KEY` is sent as a bearer token when your server needs one
+   and is never logged. The URL must be plain `http(s)://host[:port]/path` with no
+   credentials or query string; `/chat/completions` is appended.
+3. Check the configuration offline, rebuild and recreate the service. The bot
+   starts without the model server and reports it unavailable until it answers.
+
+The prompt contains the rule text and the optional
+[`rules/classifier-guidance.md`](rules/classifier-guidance.md), which tunes
+judgement, for example the rule 2 boundary between community-server play and
+activation or DRM bypass. The model must answer with one JSON object: a rule
+number or null, a score from 0 to 1 and a short reason. Anything else is "no
+verdict" and is counted, not acted on. Verdicts at or above
+`MODERATION_LLM_MIN_SCORE` (default 0.5) become flags whose reason starts with
+`model:`; the reason is sanitized and capped before it reaches the staff post.
+The model's text is never logged, because it can echo the message.
+
+Message text sent to the model is capped at `MODERATION_LLM_MAX_CHARS` (default
+2000), is processed in memory only, and is framed as untrusted data: instructions
+inside a message are treated as part of the message. Members with Manage
+Messages are skipped unless `MODERATION_LLM_SKIP_STAFF=false`. Requests run one
+at a time (`MODERATION_LLM_CONCURRENCY`, at most 2) with a
+`MODERATION_LLM_TIMEOUT_SECONDS` timeout. After
+`MODERATION_LLM_FAILURE_THRESHOLD` consecutive failures (default 3) the bot stops
+calling the model for `MODERATION_LLM_COOLDOWN_SECONDS` (default 300), keeps the
+deterministic filters running and shows "unavailable" in `/moderation`.
+
+To measure a model before trusting it, run the evaluation against the synthetic
+labelled examples in [`rules/classifier-examples.json`](rules/classifier-examples.json),
+which cover every rule, allowed look-alikes and prompt-injection attempts:
+
+```sh
+uv run --locked --env-file .env afterhours-bot-evaluate
+```
+
+It prints per-rule precision and recall and the mismatched example IDs, never
+the texts, and exits non-zero when any example got no verdict. Add your own
+examples to a copy of the file and pass `--examples`. This is a manual check
+against a live endpoint; the offline test suite uses a fake endpoint and does
+not prove any particular model's accuracy.
 
 ## Persistent data
 

@@ -4,10 +4,12 @@
 """The community rule text and its content digest, used for revision tracking."""
 
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 MAX_RULES_BYTES = 65_536
+RULE_HEADING = re.compile(r"^#+\s*(\d{1,2})\.", re.MULTILINE)
 
 
 class ModerationRulesError(RuntimeError):
@@ -22,6 +24,12 @@ class RuleSet:
     @property
     def short_digest(self) -> str:
         return self.sha256[:12]
+
+    @property
+    def numbers(self) -> tuple[int, ...]:
+        """Rule numbers from headings such as `# 2. No piracy`."""
+        found = {int(match) for match in RULE_HEADING.findall(self.text)}
+        return tuple(sorted(number for number in found if 0 < number < 100))
 
 
 def load_rules(path: Path, *, max_bytes: int = MAX_RULES_BYTES) -> RuleSet:

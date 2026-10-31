@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 
 import discord
 
+from afterhours_bot.classifier import Classifier
 from afterhours_bot.config import ModerationSettings
 from afterhours_bot.filters import Flag, RepeatTracker, evaluate
 from afterhours_bot.moderation import IntakeMessage
@@ -70,6 +71,7 @@ class StaffReviewer:
         guild_id: int,
         rules_revision: Callable[[], int | None],
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        classifier: Classifier | None = None,
     ) -> None:
         self.client = client
         self.settings = settings
@@ -77,6 +79,7 @@ class StaffReviewer:
         self.guild_id = guild_id
         self.rules_revision = rules_revision
         self.clock = clock
+        self.classifier = classifier
         self.tracker = RepeatTracker(settings.repeat_window_seconds, settings.repeat_threshold)
         self._counters = ReviewCounters()
         self._recent_posts: deque[float] = deque()
@@ -94,8 +97,17 @@ class StaffReviewer:
             and asyncio.get_running_loop().time() < self._posting_disabled_until
         )
 
+    def _classifiable(self, message: IntakeMessage) -> bool:
+        llm = self.settings.llm
+        if llm is None or self.classifier is None or not message.content.strip():
+            return False
+        return not (llm.skip_staff and message.author_manages_messages)
+
     async def review(self, message: IntakeMessage) -> None:
         flags = evaluate(message, self.settings, self.tracker)
+        if not flags and self._classifiable(message):
+            # The model only sees what the deterministic filters let through.
+            flags = await self._classify(message)
         if not flags:
             return
         self._counters = replace(self._counters, flagged=self._counters.flagged + 1)
@@ -112,6 +124,15 @@ class StaffReviewer:
             retention_days=self.settings.audit_retention_days,
             max_rows=self.settings.audit_max_rows,
         )
+
+    async def _classify(self, message: IntakeMessage) -> tuple[Flag, ...]:
+        llm = self.settings.llm
+        if llm is None or self.classifier is None:
+            return ()
+        verdict = await self.classifier.classify(message.content)
+        if verdict is None or verdict.rule is None or verdict.score < llm.min_score:
+            return ()
+        return (Flag(verdict.rule, verdict.score, "llm", f"model: {verdict.reason}"),)
 
     def _rate_limited(self, now: float) -> bool:
         while self._recent_posts and now - self._recent_posts[0] >= RATE_WINDOW_SECONDS:

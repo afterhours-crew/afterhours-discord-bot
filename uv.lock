@@ -7,6 +7,7 @@ name = "afterhours-discord-bot"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "discord-py" },
 ]
 
@@ -18,7 +19,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "discord-py", specifier = "==2.7.1" }]
+requires-dist = [
+    { name = "aiohttp", specifier = "==3.14.5" },
+    { name = "discord-py", specifier = "==2.7.1" },
+]
 
 [package.metadata.requires-dev]
 dev = [

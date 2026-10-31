@@ -6,6 +6,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 class ConfigurationError(ValueError):
@@ -58,6 +59,23 @@ DEFAULT_ATTACHMENT_DENYLIST = (
 
 
 @dataclass(frozen=True)
+class LlmSettings:
+    """An OpenAI-compatible chat completions endpoint that judges messages against the rules."""
+
+    url: str
+    model: str
+    api_key: str | None = field(default=None, repr=False)
+    guidance_path: Path | None = Path("rules/classifier-guidance.md")
+    timeout_seconds: int = 20
+    concurrency: int = 1
+    max_chars: int = 2000
+    failure_threshold: int = 3
+    cooldown_seconds: int = 300
+    min_score: float = 0.5
+    skip_staff: bool = True
+
+
+@dataclass(frozen=True)
 class ModerationSettings:
     """Review is enabled by naming the staff channel; it needs the Message Content intent."""
 
@@ -71,6 +89,7 @@ class ModerationSettings:
     audit_retention_days: int = 90
     audit_max_rows: int = 100_000
     flags_per_minute: int = 20
+    llm: LlmSettings | None = None
 
 
 def _file_path(env: Mapping[str, str], name: str, default: str) -> Path:
@@ -78,6 +97,79 @@ def _file_path(env: Mapping[str, str], name: str, default: str) -> Path:
     if not raw or "\x00" in raw:
         raise ConfigurationError(f"{name} must name a file.")
     return Path(raw)
+
+
+def _optional_file_path(env: Mapping[str, str], name: str, default: str) -> Path | None:
+    raw = env.get(name, default).strip()
+    if not raw:
+        return None
+    if "\x00" in raw:
+        raise ConfigurationError(f"{name} must name a file.")
+    return Path(raw)
+
+
+def _fraction(env: Mapping[str, str], name: str, default: str) -> float:
+    raw = env.get(name, default).strip()
+    if not raw.isascii() or len(raw) > 6 or not all(c.isdigit() or c == "." for c in raw):
+        raise ConfigurationError(f"{name} must be a number between 0 and 1.")
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ConfigurationError(f"{name} must be a number between 0 and 1.") from None
+    if not 0 <= value <= 1:
+        raise ConfigurationError(f"{name} must be a number between 0 and 1.")
+    return value
+
+
+def _flag(env: Mapping[str, str], name: str, default: str) -> bool:
+    raw = env.get(name, default).strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ConfigurationError(f"{name} must be true or false.")
+
+
+def _endpoint(raw: str, name: str) -> str:
+    if len(raw) > 2048 or not raw.isascii() or any(c.isspace() for c in raw):
+        raise ConfigurationError(f"{name} must be an http(s) URL without credentials.")
+    parts = urlsplit(raw)
+    if (
+        parts.scheme not in ("http", "https")
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or parts.query
+        or parts.fragment
+    ):
+        raise ConfigurationError(f"{name} must be an http(s) URL without credentials.")
+    return raw.rstrip("/")
+
+
+def parse_llm_settings(env: Mapping[str, str]) -> LlmSettings | None:
+    """The language-model classifier is enabled by MODERATION_LLM_URL."""
+    raw_url = env.get("MODERATION_LLM_URL", "").strip()
+    if not raw_url:
+        return None
+    model = env.get("MODERATION_LLM_MODEL", "").strip()
+    if not model or len(model) > 200 or not model.isascii() or any(c.isspace() for c in model):
+        raise ConfigurationError("MODERATION_LLM_MODEL is required with MODERATION_LLM_URL.")
+    api_key = env.get("MODERATION_LLM_API_KEY", "").strip() or None
+    return LlmSettings(
+        url=_endpoint(raw_url, "MODERATION_LLM_URL"),
+        model=model,
+        api_key=api_key,
+        guidance_path=_optional_file_path(
+            env, "MODERATION_LLM_GUIDANCE_PATH", "rules/classifier-guidance.md"
+        ),
+        timeout_seconds=_positive_integer(env, "MODERATION_LLM_TIMEOUT_SECONDS", 20, 300),
+        concurrency=_positive_integer(env, "MODERATION_LLM_CONCURRENCY", 1, 2),
+        max_chars=_bounded_integer(env, "MODERATION_LLM_MAX_CHARS", 2000, 100, 20_000),
+        failure_threshold=_positive_integer(env, "MODERATION_LLM_FAILURE_THRESHOLD", 3, 100),
+        cooldown_seconds=_positive_integer(env, "MODERATION_LLM_COOLDOWN_SECONDS", 300, 86_400),
+        min_score=_fraction(env, "MODERATION_LLM_MIN_SCORE", "0.5"),
+        skip_staff=_flag(env, "MODERATION_LLM_SKIP_STAFF", "true"),
+    )
 
 
 def _deny_list(env: Mapping[str, str], name: str, default: str) -> tuple[DenyEntry, ...]:
@@ -162,6 +254,7 @@ class Settings:
                     env, "MODERATION_AUDIT_MAX_ROWS", 100_000, 100, 10_000_000
                 ),
                 flags_per_minute=_positive_integer(env, "MODERATION_FLAGS_PER_MINUTE", 20, 600),
+                llm=parse_llm_settings(env),
             )
             if raw_staff_channel
             else None
