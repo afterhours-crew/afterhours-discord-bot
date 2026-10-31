@@ -27,6 +27,8 @@ class IntakeMessage:
     author_id: int
     created_at: datetime
     content: str
+    jump_url: str = ""
+    attachment_names: tuple[str, ...] = ()
 
 
 def select_message(
@@ -51,6 +53,8 @@ def select_message(
         author_id=message.author.id,
         created_at=message.created_at,
         content=message.content,
+        jump_url=message.jump_url,
+        attachment_names=tuple(attachment.filename for attachment in message.attachments),
     )
 
 
@@ -71,7 +75,7 @@ type Reviewer = Callable[[IntakeMessage], Awaitable[None]]
 
 
 async def no_review(message: IntakeMessage) -> None:
-    """Placeholder until review layers exist; the message is discarded."""
+    """Placeholder reviewer; the message is discarded."""
 
 
 class ModerationIntake:

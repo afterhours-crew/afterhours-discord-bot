@@ -164,7 +164,7 @@ def test_restart_preserves_cursor_counts_and_nonsecret_configuration(store: Acti
                     "window_days": 14,
                     "min_messages": 3,
                 }
-                assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+                assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
                 columns = {row[1] for row in connection.execute("PRAGMA table_info(activity)")}
                 assert columns == {
                     "guild_id",

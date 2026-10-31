@@ -40,9 +40,12 @@ def test_moderation_is_off_without_a_staff_channel() -> None:
 
 def test_staff_channel_enables_moderation_with_defaults() -> None:
     settings = Settings.from_env({**BASE_ENV, "MODERATION_STAFF_CHANNEL_ID": "555"})
-    assert settings.moderation == ModerationSettings(
-        staff_channel_id=555, rules_path=Path("rules/community-rules.md"), queue_size=1000
-    )
+    assert settings.moderation is not None
+    assert settings.moderation.staff_channel_id == 555
+    assert settings.moderation.rules_path == Path("rules/community-rules.md")
+    assert settings.moderation.queue_size == 1000
+    assert settings.moderation.link_denylist == ()
+    assert settings.moderation.attachment_denylist  # Executables and scripts by default.
 
 
 def test_moderation_rules_path_and_queue_size_are_configurable() -> None:
@@ -142,6 +145,8 @@ def message(**overrides: object) -> discord.Message:
         "channel": channel,
         "created_at": NOW,
         "content": "hello",
+        "jump_url": "https://discord.com/channels/123/10/1000",
+        "attachments": [SimpleNamespace(filename="photo.png")],
     }
     fields.update(overrides)
     return Mock(spec=discord.Message, **fields)
@@ -150,7 +155,13 @@ def message(**overrides: object) -> discord.Message:
 def test_ordinary_member_messages_are_selected_with_their_identities() -> None:
     selected = select_message(message(), MODERATION, 123)
     assert selected == IntakeMessage(
-        message_id=1000, channel_id=10, author_id=42, created_at=NOW, content="hello"
+        message_id=1000,
+        channel_id=10,
+        author_id=42,
+        created_at=NOW,
+        content="hello",
+        jump_url="https://discord.com/channels/123/10/1000",
+        attachment_names=("photo.png",),
     )
 
 

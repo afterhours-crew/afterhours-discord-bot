@@ -78,7 +78,7 @@ def test_moderation_command_reports_when_the_feature_is_off() -> None:
     async def scenario() -> None:
         async with CommunityBot(Settings(token="example-secret", guild_id=123)) as bot:  # noqa: S106
             assert bot.tree.get_command("moderation", guild=GUILD) is not None
-            assert bot.moderation_status().startswith("Moderation is off")
+            assert (await bot.moderation_status()).startswith("Moderation is off")
 
     asyncio.run(scenario())
 
@@ -96,8 +96,9 @@ def test_setup_loads_rules_once_starts_one_worker_and_shutdown_cancels_it(
             assert await bot.store.rules_revision(123) == (1, bot.rules_digest)
             task = bot._moderation_task
             assert task is not None and not task.done()
-            status = bot.moderation_status()
+            status = await bot.moderation_status()
             assert "revision 1" in status and "Review worker: running" in status
+            assert "Flags: 0 flagged" in status and "Audit: 0 stored flags" in status
             await bot.close()
             assert task.cancelled()
             assert bot._moderation_task is None
@@ -140,6 +141,8 @@ def test_messages_are_selected_and_queued_from_the_event_handler() -> None:
             "channel": SimpleNamespace(id=10, parent_id=None),
             "created_at": datetime.now(UTC),
             "content": "hello",
+            "jump_url": "https://discord.com/channels/123/10/1000",
+            "attachments": [],
         }
         fields.update(overrides)
         return Mock(spec=discord.Message, **fields)

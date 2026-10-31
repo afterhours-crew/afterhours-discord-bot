@@ -18,6 +18,7 @@ from afterhours_bot.activity_service import (
 )
 from afterhours_bot.config import Settings
 from afterhours_bot.moderation import ModerationIntake, select_message
+from afterhours_bot.review import ReviewView, StaffReviewer
 from afterhours_bot.rules import load_rules
 from afterhours_bot.storage import ActivityStateError, ActivityStore
 
@@ -70,11 +71,19 @@ class CommunityBot(discord.Client):
         self._activity_task: asyncio.Task[None] | None = None
         self._moderation_task: asyncio.Task[None] | None = None
         self.store = ActivityStore(settings.database_path)
-        self.moderation = (
-            ModerationIntake(settings.moderation) if settings.moderation is not None else None
-        )
         self.rules_revision: int | None = None
         self.rules_digest: str | None = None
+        self.reviewer: StaffReviewer | None = None
+        self.moderation: ModerationIntake | None = None
+        if settings.moderation is not None:
+            self.reviewer = StaffReviewer(
+                self,
+                settings.moderation,
+                self.store,
+                guild_id=settings.guild_id,
+                rules_revision=lambda: self.rules_revision,
+            )
+            self.moderation = ModerationIntake(settings.moderation, reviewer=self.reviewer.review)
         guild = discord.Object(id=settings.guild_id)
 
         @self.tree.command(
@@ -103,14 +112,17 @@ class CommunityBot(discord.Client):
         @app_commands.guild_only()
         @app_commands.default_permissions(manage_messages=True)
         async def moderation(interaction: discord.Interaction[CommunityBot]) -> None:
-            await interaction.response.send_message(self.moderation_status(), ephemeral=True)
+            await interaction.response.send_message(await self.moderation_status(), ephemeral=True)
 
-    def moderation_status(self) -> str:
+    async def moderation_status(self) -> str:
         """Feature state for staff; it never includes message text, members or secrets."""
         settings = self.settings.moderation
-        if settings is None or self.moderation is None:
+        if settings is None or self.moderation is None or self.reviewer is None:
             return "Moderation is off. Set MODERATION_STAFF_CHANNEL_ID to enable message review."
         counters = self.moderation.counters
+        review = self.reviewer.counters
+        stored, open_flags = await self.store.flag_summary(self.settings.guild_id)
+        posting = "paused" if self.reviewer.posting_disabled else "enabled"
         rules = (
             f"revision {self.rules_revision} ({self.rules_digest[:12]})"
             if self.rules_revision is not None and self.rules_digest is not None
@@ -129,7 +141,11 @@ class CommunityBot(discord.Client):
             f"Review worker: {worker}\n"
             f"Intake: {counters.submitted} submitted, {counters.queued} queued, "
             f"{counters.dropped} dropped, {counters.reviewed} reviewed, "
-            f"{counters.failed} failed, {counters.pending} pending."
+            f"{counters.failed} failed, {counters.pending} pending.\n"
+            f"Flags: {review.flagged} flagged, {review.posted} posted, "
+            f"{review.suppressed} rate limited, {review.unposted} unposted, "
+            f"{review.decisions} decided this run; staff posting {posting}.\n"
+            f"Audit: {stored} stored flags, {open_flags} awaiting a decision."
         )
 
     async def setup_hook(self) -> None:
@@ -153,6 +169,9 @@ class CommunityBot(discord.Client):
         if self.settings.active_role is not None and self._activity_task is None:
             self._activity_task = asyncio.create_task(self._activity_loop(), name="active-role")
         if self.moderation is not None and self._moderation_task is None:
+            if self.reviewer is not None:
+                # Buttons on earlier review posts keep working across restarts.
+                self.add_view(ReviewView(self.reviewer))
             self._moderation_task = asyncio.create_task(self.moderation.run(), name="moderation")
 
     async def on_message(self, message: discord.Message) -> None:
