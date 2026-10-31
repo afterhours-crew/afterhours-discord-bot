@@ -452,9 +452,10 @@ def test_model_verdicts_become_staff_flags_only_above_the_minimum_score(tmp_path
             await instance.close()
             await store.close()
         channel.send.assert_awaited_once()
-        post = channel.send.call_args.args[0]
-        assert "Rule 2: model: asks for a crack (confidence 0.90, llm)" in post
-        assert "secret-text" not in post
+        embed = channel.send.call_args.kwargs["embed"]
+        why = {field.name: field.value for field in embed.fields}["Why"]
+        assert why == "model: asks for a crack (rule 2, 90%)"
+        assert embed.title == "Rule 2"  # No titles are wired in this reviewer.
         assert len(endpoint.requests) == 3
 
     run_with_server(endpoint, scenario)

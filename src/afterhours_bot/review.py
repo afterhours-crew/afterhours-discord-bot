@@ -47,18 +47,102 @@ class ReviewCounters:
     reflagged: int = 0
 
 
-def format_post(message: IntakeMessage, flags: tuple[Flag, ...], rules_revision: int | None) -> str:
-    """Staff post text: rule, confidence, reason and a jump link. Never the message text."""
-    lines = ["**Review needed** (shadow mode: nothing was done automatically)"]
-    for flag in flags:
-        lines.append(
-            f"Rule {flag.rule}: {flag.reason} (confidence {flag.score:.2f}, {flag.source})"
-        )
-    link = message.jump_url or f"message {message.message_id}"
+MAX_EXCERPT_CHARS = 1000
+MAX_LISTED_ATTACHMENTS = 5
+COLOR_HIGH = 0xE74C3C
+COLOR_MEDIUM = 0xE67E22
+COLOR_LOW = 0x95A5A6
+COLOR_DISMISSED = 0x2ECC71
+COLOR_ACTED = 0x3498DB
+COLOR_FAILED = 0xD35400
+
+
+def excerpt(text: str, limit: int = MAX_EXCERPT_CHARS) -> str:
+    """A quoted, mention-safe copy of the message text for staff to read in place."""
+    cleaned = discord.utils.escape_mentions(text.strip())
+    if len(cleaned) > limit:
+        cleaned = cleaned[: limit - 1].rstrip() + "…"
+    return "\n".join(f"> {line}" if line else ">" for line in cleaned.splitlines())
+
+
+def build_embed(
+    message: IntakeMessage,
+    flags: tuple[Flag, ...],
+    rules_revision: int | None,
+    titles: Mapping[int, str],
+    *,
+    show_excerpt: bool = True,
+    automatic: str | None = None,
+) -> discord.Embed:
+    """One review post: what was said, which rule, why, and where to find it."""
+    numbers = sorted({flag.rule for flag in flags})
+    if len(numbers) == 1:
+        title = f"Rule {numbers[0]}"
+        if numbers[0] in titles:
+            title += f" · {titles[numbers[0]]}"
+    else:
+        title = "Rules " + ", ".join(str(number) for number in numbers)
+    best = max(flag.score for flag in flags)
+    color = COLOR_HIGH if best >= 0.8 else COLOR_MEDIUM if best >= 0.5 else COLOR_LOW
+    embed = discord.Embed(title=title, color=color, url=message.jump_url or None)
+    body = excerpt(message.content) if show_excerpt else ""
+    embed.description = body or "*(no text)*"
+    embed.add_field(name="Author", value=f"<@{message.author_id}>", inline=True)
+    embed.add_field(name="Channel", value=f"<#{message.channel_id}>", inline=True)
+    embed.add_field(
+        name="Confidence",
+        value=f"{best:.0%} · " + ", ".join(sorted({flag.source for flag in flags})),
+        inline=True,
+    )
+    embed.add_field(
+        name="Why",
+        value="\n".join(f"{flag.reason} (rule {flag.rule}, {flag.score:.0%})" for flag in flags),
+        inline=False,
+    )
+    if message.attachment_names:
+        names = list(message.attachment_names)
+        listed = ", ".join(names[:MAX_LISTED_ATTACHMENTS])
+        if len(names) > MAX_LISTED_ATTACHMENTS:
+            listed += f" and {len(names) - MAX_LISTED_ATTACHMENTS} more"
+        embed.add_field(name="Attachments", value=listed[:1024], inline=False)
+    if message.image_urls and show_excerpt:
+        embed.set_image(url=message.image_urls[0])
+    if automatic is not None:
+        embed.add_field(name="Automatic action", value=automatic, inline=False)
     revision = f"rules revision {rules_revision}" if rules_revision is not None else "rules unknown"
-    lines.append(f"Message: {link} by <@{message.author_id}> in <#{message.channel_id}>")
-    lines.append(f"Reviewed against {revision}.")
-    return "\n".join(lines)
+    mode = "automatic action taken" if automatic is not None else "nothing done automatically"
+    embed.set_footer(text=f"{revision} · {mode}")
+    embed.timestamp = message.created_at
+    return embed
+
+
+def resolve_embed(
+    embed: discord.Embed, decision: str, decider_id: int, outcome: Outcome | None
+) -> discord.Embed:
+    """Mark a review post as handled: colour and a Resolved field, no appended text."""
+    if decision == "dismiss":
+        embed.color = COLOR_DISMISSED
+        value = f"Dismissed by <@{decider_id}>"
+    else:
+        embed.color = COLOR_ACTED if outcome is not None and outcome.ok else COLOR_FAILED
+        value = f"{decision.capitalize()} by <@{decider_id}>"
+        if outcome is not None:
+            value += f"\n{outcome.summary}"
+    embed.add_field(name="Resolved", value=value, inline=False)
+    return embed
+
+
+class LinkView(discord.ui.View):
+    """Only the link to the original message; used once a post is resolved or automatic."""
+
+    def __init__(self, jump_url: str | None) -> None:
+        super().__init__(timeout=None)
+        if jump_url:
+            self.add_item(
+                discord.ui.Button(
+                    label="Open message", style=discord.ButtonStyle.link, url=jump_url
+                )
+            )
 
 
 class StaffReviewer:
@@ -83,6 +167,7 @@ class StaffReviewer:
         self.rules_revision = rules_revision
         self.clock = clock
         self.classifier = classifier
+        self.rule_titles = rule_titles
         self.executor = ActionExecutor(client, settings, guild_id=guild_id, rule_titles=rule_titles)
         self._context: OrderedDict[int, deque[tuple[int, str]]] = OrderedDict()
         self.tracker = RepeatTracker(settings.repeat_window_seconds, settings.repeat_threshold)
@@ -144,14 +229,16 @@ class StaffReviewer:
             if not flags and message.image_urls:
                 flags = await self._classify(message, image_urls=message.image_urls)
         self._remember(message)
-        if not flags:
-            return
-        self._counters = replace(self._counters, flagged=self._counters.flagged + 1)
         existing_count, existing_post = 0, None
         if message.edited:
             existing_count, existing_post = await self.store.message_flags(
                 self.guild_id, message.message_id
             )
+            if existing_post is not None:
+                await self._refresh_post(existing_post, message, flags)
+        if not flags:
+            return
+        self._counters = replace(self._counters, flagged=self._counters.flagged + 1)
         auto = None if existing_count else self._auto_action(message, flags)
         outcome: Outcome | None = None
         if auto is not None:
@@ -159,10 +246,7 @@ class StaffReviewer:
                 message.message_id, message.channel_id, message.author_id, (auto.rule,)
             )
             outcome = await self.executor.perform(auto.action, target)
-            note = (
-                f"**Automatic:** {auto.action} ({auto.source}, rule {auto.rule}) — "
-                f"{outcome.summary}"
-            )
+            note = f"{auto.action} ({auto.source}, rule {auto.rule}): {outcome.summary}"
         else:
             note = None
         if existing_count:
@@ -195,6 +279,39 @@ class StaffReviewer:
             self._counters = replace(self._counters, automatic=self._counters.automatic + 1)
             if outcome.ok:
                 self._counters = replace(self._counters, actions=self._counters.actions + 1)
+
+    async def _refresh_post(
+        self, post_id: int, message: IntakeMessage, flags: tuple[Flag, ...]
+    ) -> None:
+        """Show the edited text on the existing review post, keeping the original excerpt."""
+        try:
+            channel = await self._staff_channel()
+            if channel is None:
+                return
+            post = await channel.fetch_message(post_id)
+            if not post.embeds:
+                return
+            embed = post.embeds[0]
+            names = [field.name for field in embed.fields]
+            if self.settings.post_excerpt:
+                if "Original" not in names:
+                    original = (embed.description or "")[:1024] or "*(no text)*"
+                    embed.add_field(name="Original", value=original, inline=False)
+                embed.description = excerpt(message.content) or "*(no text)*"
+            for index, name in reversed(list(enumerate(names))):
+                if name == "Edited":
+                    embed.remove_field(index)
+            value = f"edited {discord.utils.format_dt(self.clock(), 'R')}"
+            if flags:
+                value += "; now: " + "; ".join(
+                    f"{flag.reason} (rule {flag.rule}, {flag.score:.0%})" for flag in flags
+                )
+            else:
+                value += "; the filters find nothing in the new text"
+            embed.add_field(name="Edited", value=value[:1024], inline=False)
+            await post.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        except discord.DiscordException as error:
+            logger.warning("Review post could not follow an edit (%s).", type(error).__name__)
 
     def _bot_id(self) -> int:
         user = self.client.user
@@ -276,12 +393,22 @@ class StaffReviewer:
             channel = await self._staff_channel()
             if channel is None:
                 raise StaffChannelUnavailable
-            text = format_post(message, flags, self.rules_revision())
-            if note is not None:
-                text += f"\n{note}"
+            embed = build_embed(
+                message,
+                flags,
+                self.rules_revision(),
+                self.rule_titles(),
+                show_excerpt=self.settings.post_excerpt,
+                automatic=note,
+            )
+            view: discord.ui.View = (
+                ReviewView(self, jump_url=message.jump_url)
+                if note is None
+                else LinkView(message.jump_url)
+            )
             post = await channel.send(
-                text,
-                view=ReviewView(self) if note is None else discord.utils.MISSING,
+                embed=embed,
+                view=view,
                 allowed_mentions=discord.AllowedMentions.none(),
                 silent=True,
             )
@@ -355,13 +482,15 @@ class StaffReviewer:
         await self.store.record_outcome(self.guild_id, interaction.message.id, outcome.summary)
         if outcome.ok:
             self._counters = replace(self._counters, actions=self._counters.actions + 1)
-        status = "" if decision == "dismiss" else f" — {outcome.summary}"
-        content = (
-            f"{interaction.message.content}\n**Resolved:** {decision} by "
-            f"<@{interaction.user.id}>{status}"
+        embeds = interaction.message.embeds
+        embed = embeds[0] if embeds else discord.Embed(title="Review")
+        resolved = resolve_embed(
+            embed, decision, interaction.user.id, None if decision == "dismiss" else outcome
         )
         await interaction.response.edit_message(
-            content=content, view=None, allowed_mentions=discord.AllowedMentions.none()
+            embed=resolved,
+            view=LinkView(embed.url),
+            allowed_mentions=discord.AllowedMentions.none(),
         )
         if decision != "dismiss":
             prefix = "Done:" if outcome.ok else "Not done:"
@@ -371,9 +500,15 @@ class StaffReviewer:
 class ReviewView(discord.ui.View):
     """Persistent buttons; the post message ID links clicks back to the audit."""
 
-    def __init__(self, reviewer: StaffReviewer) -> None:
+    def __init__(self, reviewer: StaffReviewer, *, jump_url: str | None = None) -> None:
         super().__init__(timeout=None)
         self.reviewer = reviewer
+        if jump_url:
+            self.add_item(
+                discord.ui.Button(
+                    label="Open message", style=discord.ButtonStyle.link, url=jump_url
+                )
+            )
 
     async def on_error(
         self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[ReviewView]
