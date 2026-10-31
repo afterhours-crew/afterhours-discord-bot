@@ -73,7 +73,6 @@ def build_embed(
     *,
     show_excerpt: bool = True,
     automatic: str | None = None,
-    flagged_at: datetime | None = None,
     models: Mapping[str, str] | None = None,
 ) -> discord.Embed:
     """One review post: what was said, which rule, why, and where to find it."""
@@ -106,11 +105,8 @@ def build_embed(
     named = models or {}
     labelled = [f"{source} ({named[source]})" if source in named else source for source in sources]
     details = [
-        f"Score {best:.2f} · source {', '.join(labelled)}",
-        f"Message {message.message_id} · author {message.author_id} · channel {message.channel_id}",
-        f"Sent {discord.utils.format_dt(message.created_at, 'f')}"
-        + (f" · flagged {discord.utils.format_dt(flagged_at, 'R')}" if flagged_at else "")
-        + (" · edited" if message.edited else ""),
+        f"Score {best:.2f} · source {', '.join(labelled)}"
+        + (" · flagged after an edit" if message.edited else ""),
         f"Rules revision {rules_revision if rules_revision is not None else 'unknown'}",
     ]
     embed.add_field(name="Details", value="\n".join(details)[:1024], inline=False)
@@ -421,7 +417,6 @@ class StaffReviewer:
                 self.rule_titles(),
                 show_excerpt=self.settings.post_excerpt,
                 automatic=note,
-                flagged_at=self.clock(),
                 models=models,
             )
             view: discord.ui.View = (
