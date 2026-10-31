@@ -19,6 +19,7 @@ from afterhours_bot.rules import ModerationRulesError, RuleSet, load_rules
 logger = logging.getLogger(__name__)
 MAX_EXAMPLES = 10_000
 MAX_EXAMPLE_CHARS = 20_000
+MAX_CONTEXT_LINES = 10
 
 
 class ExamplesError(ValueError):
@@ -30,6 +31,7 @@ class Example:
     id: str
     rule: int | None
     text: str
+    context: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -56,11 +58,19 @@ class Report:
     unavailable: int = 0
     per_rule: dict[int, RuleScore] = field(default_factory=dict)
     mismatches: list[tuple[str, int | None, int | None, float | None]] = field(default_factory=list)
+    verdicts: list[tuple[str, int | None, int | None, float | None, str]] = field(
+        default_factory=list
+    )
 
-    def render(self) -> str:
+    def render(self, *, verbose: bool = False) -> str:
         lines = [
             f"Examples: {self.total}, correct: {self.correct}, no verdict: {self.unavailable}."
         ]
+        if verbose:
+            for example_id, expected, rule, verdict_score, reason in self.verdicts:
+                detail = "no verdict" if verdict_score is None else f"{rule} {verdict_score:.2f}"
+                mark = " " if (rule if verdict_score else None) == expected else "!"
+                lines.append(f"{mark} {example_id}: expected {expected}, model {detail} {reason}")
         for rule in sorted(self.per_rule):
             score = self.per_rule[rule]
             precision = "n/a" if score.precision is None else f"{score.precision:.2f}"
@@ -100,8 +110,16 @@ def load_examples(path: Path) -> tuple[Example, ...]:
             or len(item["text"]) > MAX_EXAMPLE_CHARS
         ):
             raise ExamplesError("Each example needs a unique id, a rule number or null, and text.")
+        context = item.get("context", [])
+        if (
+            not isinstance(context, list)
+            or len(context) > MAX_CONTEXT_LINES
+            or not all(isinstance(line, str) and line.strip() for line in context)
+            or any(len(line) > MAX_EXAMPLE_CHARS for line in context)
+        ):
+            raise ExamplesError("Example context must be a short list of earlier message texts.")
         seen.add(item["id"])
-        examples.append(Example(item["id"], item["rule"], item["text"]))
+        examples.append(Example(item["id"], item["rule"], item["text"], tuple(context)))
     return tuple(examples)
 
 
@@ -110,14 +128,18 @@ async def evaluate_examples(
 ) -> Report:
     report = Report(total=len(examples))
     for example in examples:
-        verdict = await classifier.classify(example.text)
+        verdict = await classifier.classify(example.text, context=example.context)
         if verdict is None:
             report.unavailable += 1
             predicted: int | None = None
             verdict_score: float | None = None
+            report.verdicts.append((example.id, example.rule, None, None, ""))
         else:
             predicted = verdict.rule if verdict.score >= min_score else None
             verdict_score = verdict.score
+            report.verdicts.append(
+                (example.id, example.rule, verdict.rule, verdict.score, verdict.reason)
+            )
         if predicted == example.rule:
             report.correct += 1
         else:
@@ -171,6 +193,9 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
         default=Path("rules/community-rules.md"),
         help="Rule text to judge against (default: rules/community-rules.md).",
     )
+    parser.add_argument(
+        "--verbose", action="store_true", help="List every verdict with its score and reason."
+    )
     args = parser.parse_args(argv)
     environment = os.environ if env is None else env
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
@@ -188,7 +213,7 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
     except (ConfigurationError, ModerationRulesError, ExamplesError) as error:
         parser.error(str(error))
     report = asyncio.run(run(settings, rules, guidance, examples))
-    print(report.render())
+    print(report.render(verbose=args.verbose))
     return 0 if report.unavailable == 0 else 1
 
 
