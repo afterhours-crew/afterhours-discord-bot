@@ -44,6 +44,15 @@ class SourcePosition:
 
 
 @dataclass(frozen=True)
+class ActiveRules:
+    text: str
+    sha256: str
+    revision: int
+    source: str
+    file_sha256: str
+
+
+@dataclass(frozen=True)
 class ReviewDecision:
     flags: int
     decision: str
@@ -399,11 +408,28 @@ class ActivityStore:
 
         return await self._call(operation)
 
-    async def configure_rules(self, guild_id: int, rules: RuleSet, *, as_of: datetime) -> int:
+    async def configure_rules(
+        self,
+        guild_id: int,
+        rules: RuleSet,
+        *,
+        as_of: datetime,
+        source: str = "file",
+        file_sha256: str | None = None,
+    ) -> int:
         """Save the community rule text; the revision changes only with the content."""
         guild, now = _identifier(guild_id), microseconds(as_of)
+        if source not in ("file", "upload"):
+            raise ActivityStateError("Unknown rules source.")
         encoded = json.dumps(
-            {"sha256": rules.sha256, "text": rules.text}, sort_keys=True, separators=(",", ":")
+            {
+                "sha256": rules.sha256,
+                "text": rules.text,
+                "source": source,
+                "file_sha256": file_sha256 or rules.sha256,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
         )
 
         def operation() -> int:
@@ -414,19 +440,10 @@ class ActivityStore:
                     "WHERE guild_id=? AND key='moderation_rules'",
                     (guild,),
                 ).fetchone()
-                try:
-                    previous = json.loads(row[0]) if row is not None else None
-                    if previous is not None and (
-                        not isinstance(previous, dict)
-                        or type(previous.get("sha256")) is not str
-                        or type(previous.get("text")) is not str
-                    ):
-                        raise ValueError
-                except ValueError, TypeError:
-                    raise ActivityStateError("Saved moderation rules are invalid.") from None
+                previous = self._saved_rules(row[0]) if row is not None else None
                 changed = previous is None or previous["sha256"] != rules.sha256
                 revision = (int(row[1]) if row is not None else 0) + int(changed)
-                if changed:
+                if changed or (previous is not None and previous.get("source") != source):
                     connection.execute(
                         "INSERT INTO configurations VALUES (?, 'moderation_rules', ?, ?, ?) "
                         "ON CONFLICT(guild_id, key) DO UPDATE SET value_json=excluded.value_json, "
@@ -434,6 +451,44 @@ class ActivityStore:
                         (guild, encoded, revision, now),
                     )
                 return revision
+
+        return await self._call(operation)
+
+    @staticmethod
+    def _saved_rules(raw: str) -> dict[str, str]:
+        try:
+            saved = json.loads(raw)
+            if (
+                not isinstance(saved, dict)
+                or type(saved.get("sha256")) is not str
+                or type(saved.get("text")) is not str
+            ):
+                raise ValueError
+        except ValueError, TypeError:
+            raise ActivityStateError("Saved moderation rules are invalid.") from None
+        return {key: value for key, value in saved.items() if isinstance(value, str)}
+
+    async def active_rules(self, guild_id: int) -> ActiveRules | None:
+        """The saved rule text with its revision and where it came from."""
+        guild = _identifier(guild_id)
+
+        def operation() -> ActiveRules | None:
+            connection = self._database()
+            row = connection.execute(
+                "SELECT value_json, revision FROM configurations "
+                "WHERE guild_id=? AND key='moderation_rules'",
+                (guild,),
+            ).fetchone()
+            if row is None:
+                return None
+            saved = self._saved_rules(row[0])
+            return ActiveRules(
+                text=saved["text"],
+                sha256=saved["sha256"],
+                revision=int(row[1]),
+                source=saved.get("source", "file"),
+                file_sha256=saved.get("file_sha256", saved["sha256"]),
+            )
 
         return await self._call(operation)
 
@@ -596,6 +651,54 @@ class ActivityStore:
                     rules=rules,
                     created_us=created_us,
                 )
+
+        return await self._call(operation)
+
+    async def message_flags(self, guild_id: int, message_id: int) -> tuple[int, int | None]:
+        """How many flags a message already has and the review post they share, if any."""
+        guild, message = _identifier(guild_id), _identifier(message_id)
+
+        def operation() -> tuple[int, int | None]:
+            connection = self._database()
+            row = connection.execute(
+                "SELECT COUNT(*), MAX(post_message_id) FROM review_flags "
+                "WHERE guild_id=? AND message_id=?",
+                (guild, message),
+            ).fetchone()
+            post = row[1]
+            return int(row[0]), int(post) if post is not None else None
+
+        return await self._call(operation)
+
+    async def record_auto_decision(
+        self,
+        guild_id: int,
+        message_id: int,
+        *,
+        decision: str,
+        decider_id: int,
+        outcome: str,
+        as_of: datetime,
+    ) -> int:
+        """Mark every flag of a message as decided by the bot itself; returns rows updated."""
+        guild, message, decider, now = (
+            _identifier(guild_id),
+            _identifier(message_id),
+            _identifier(decider_id),
+            microseconds(as_of),
+        )
+        if not decision or len(decision) > 32 or not outcome or len(outcome) > 200:
+            raise ActivityStateError("Invalid automatic decision.")
+
+        def operation() -> int:
+            connection = self._database()
+            with self._transaction(connection):
+                cursor = connection.execute(
+                    "UPDATE review_flags SET decision=?, decider_id=?, decided_us=?, outcome=? "
+                    "WHERE guild_id=? AND message_id=? AND decision IS NULL",
+                    (decision, decider, now, outcome, guild, message),
+                )
+                return int(cursor.rowcount)
 
         return await self._call(operation)
 

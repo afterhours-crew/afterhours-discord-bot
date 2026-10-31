@@ -105,7 +105,7 @@ def test_setup_loads_rules_once_starts_one_worker_and_shutdown_cancels_it(
 
     with caplog.at_level(logging.INFO):
         asyncio.run(scenario())
-    assert "Moderation rules loaded: revision 1" in caplog.text
+    assert "Moderation rules applied from file: revision 1" in caplog.text
 
 
 def test_rule_revision_persists_across_restarts_and_changes_with_content(tmp_path: Path) -> None:

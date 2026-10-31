@@ -227,10 +227,19 @@ rule numbers, attachment types and, later, judgement calls against the rule text
 The community rules live in [`rules/community-rules.md`](rules/community-rules.md),
 which ships in the repository and the image. At startup the text is normalized
 and saved in the SQLite configuration table with a revision that increases only
-when the content changes. Later review records will cite that revision, so edit
-the file, rebuild and restart to publish a new revision. Point
+when the content changes. Review records cite that revision. Point
 `MODERATION_RULES_PATH` at another UTF-8 file (up to 64 KiB) to use a different
-text, for example from a mounted volume.
+text, for example from a mounted volume. Rule headings must look like
+`# 2. No piracy`; the number is what filters, verdicts and warnings refer to.
+
+Staff can change the active text without a rebuild through the `/rules`
+commands (visible with **Manage Messages**, private replies): `/rules show`
+reports the revision, digest, source and rule numbers; `/rules reload` re-reads
+the file from disk; `/rules upload` replaces the text with an attached `.md` or
+`.txt` file (UTF-8, at most 64 KiB, with numbered headings). An uploaded text
+stays active across restarts until the file on disk changes, at which point the
+file wins again; `/rules reload` also returns to the file. Every change is a new
+revision in the database.
 
 `/moderation` is a staff command, visible by default to members with **Manage
 Messages**, and replies privately with the feature state, staff channel, rule
@@ -239,7 +248,8 @@ shows message text, member identities or secrets.
 
 Only ordinary messages and replies from members in the configured server are
 queued; bots, webhooks, system messages, direct messages and the staff channel
-are skipped. The queue is bounded by `MODERATION_QUEUE_SIZE` (1–100000): when it
+are skipped. Edited messages are reviewed again; an edit to a message that was
+already flagged adds to the same review post instead of opening a new one. The queue is bounded by `MODERATION_QUEUE_SIZE` (1–100000): when it
 is full new messages are dropped, counted and reported in the log at most once
 a minute, without content. Message text is held in memory only while queued and
 is never written to the database or the log. Enabling moderation adds the
@@ -294,6 +304,16 @@ happens without that click.
   Needs **Moderate Members** for the clicker and for Nightshift, and the author's
   highest role must be below Nightshift's.
 
+**Automatic actions** are off by default. Once shadow-mode data shows that a
+deterministic filter is reliable, `MODERATION_AUTO_ACTIONS` can name
+`source:rule:action:score` entries, for example `invite:6:delete:0.5` to delete
+invite links or `link-domain:2:timeout:0.9` to time out members who post a
+listed piracy domain. Only the deterministic sources `repeat`, `invite`,
+`link-domain` and `attachment` qualify; model verdicts never act on their own.
+Staff authors are never acted on automatically. An automatic action still
+posts to the staff channel, without buttons, stating what was done, and is
+audited with the bot as the decider.
+
 Grant Nightshift exactly **View Channel**, **Send Messages** in the staff
 channel, **Manage Messages** and **Moderate Members**; never Administrator. The
 outcome is recorded in the audit and shown on the post, for example "message
@@ -342,7 +362,18 @@ The model's text is never logged, because it can echo the message.
 
 Message text sent to the model is capped at `MODERATION_LLM_MAX_CHARS` (default
 2000), is processed in memory only, and is framed as untrusted data: instructions
-inside a message are treated as part of the message. Members with Manage
+inside a message are treated as part of the message. For judgement calls such as
+harassment the model also sees the last `MODERATION_LLM_CONTEXT_MESSAGES`
+(default 3, 0 disables) messages of the same channel, each cut to 200
+characters and attributed to an anonymous member label; this tail lives in
+memory only and is never stored.
+
+Images are reviewed when `MODERATION_LLM_VISION_MODEL` names a model that
+accepts images through the same API (for example `llava:7b` or a Qwen vision
+model in Ollama). Up to four image attachments of at most 10 MB are passed to
+the model by their Discord URL, so the model host fetches them directly; nothing
+is stored. Image verdicts appear as `llm-image` flags. Without a vision model,
+images are ignored. Members with Manage
 Messages are skipped unless `MODERATION_LLM_SKIP_STAFF=false`. Requests run one
 at a time (`MODERATION_LLM_CONCURRENCY`, at most 2) with a
 `MODERATION_LLM_TIMEOUT_SECONDS` timeout. After

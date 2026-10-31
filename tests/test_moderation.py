@@ -146,7 +146,14 @@ def message(**overrides: object) -> discord.Message:
         "created_at": NOW,
         "content": "hello",
         "jump_url": "https://discord.com/channels/123/10/1000",
-        "attachments": [SimpleNamespace(filename="photo.png")],
+        "attachments": [
+            SimpleNamespace(
+                filename="photo.png",
+                content_type="image/png",
+                size=10,
+                url="https://cdn.example/photo.png",
+            )
+        ],
     }
     fields.update(overrides)
     return Mock(spec=discord.Message, **fields)
@@ -162,6 +169,7 @@ def test_ordinary_member_messages_are_selected_with_their_identities() -> None:
         content="hello",
         jump_url="https://discord.com/channels/123/10/1000",
         attachment_names=("photo.png",),
+        image_urls=("https://cdn.example/photo.png",),
     )
 
 

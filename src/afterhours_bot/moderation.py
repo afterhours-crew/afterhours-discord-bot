@@ -30,10 +30,31 @@ class IntakeMessage:
     jump_url: str = ""
     attachment_names: tuple[str, ...] = ()
     author_manages_messages: bool = False
+    image_urls: tuple[str, ...] = ()
+    edited: bool = False
+
+
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_IMAGES = 4
+
+
+def _image_urls(attachments: list[discord.Attachment]) -> tuple[str, ...]:
+    urls = [
+        attachment.url
+        for attachment in attachments
+        if (attachment.content_type or "").lower().startswith("image/")
+        and attachment.size <= MAX_IMAGE_BYTES
+        and attachment.url.startswith("https://")
+    ]
+    return tuple(urls[:MAX_IMAGES])
 
 
 def select_message(
-    message: discord.Message, settings: ModerationSettings, guild_id: int
+    message: discord.Message,
+    settings: ModerationSettings,
+    guild_id: int,
+    *,
+    edited: bool = False,
 ) -> IntakeMessage | None:
     """Return the message for review, or None when it is out of scope."""
     guild = message.guild
@@ -58,6 +79,8 @@ def select_message(
         jump_url=message.jump_url,
         attachment_names=tuple(attachment.filename for attachment in message.attachments),
         author_manages_messages=bool(permissions is not None and permissions.manage_messages),
+        image_urls=_image_urls(message.attachments),
+        edited=edited,
     )
 
 
