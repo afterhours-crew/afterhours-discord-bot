@@ -14,6 +14,7 @@ from pathlib import Path
 
 from afterhours_bot.activity import ActivityMessage
 from afterhours_bot.config import ActiveRoleSettings
+from afterhours_bot.rules import RuleSet
 
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 DAY_MICROSECONDS = 86_400_000_000
@@ -354,6 +355,68 @@ class ActivityStore:
                 connection.execute("DELETE FROM selected_sources")
                 connection.execute("DELETE FROM selected_members")
                 return frozenset(int(row[0]) for row in rows)
+
+        return await self._call(operation)
+
+    async def configure_rules(self, guild_id: int, rules: RuleSet, *, as_of: datetime) -> int:
+        """Save the community rule text; the revision changes only with the content."""
+        guild, now = _identifier(guild_id), microseconds(as_of)
+        encoded = json.dumps(
+            {"sha256": rules.sha256, "text": rules.text}, sort_keys=True, separators=(",", ":")
+        )
+
+        def operation() -> int:
+            connection = self._database()
+            with self._transaction(connection):
+                row = connection.execute(
+                    "SELECT value_json, revision FROM configurations "
+                    "WHERE guild_id=? AND key='moderation_rules'",
+                    (guild,),
+                ).fetchone()
+                try:
+                    previous = json.loads(row[0]) if row is not None else None
+                    if previous is not None and (
+                        not isinstance(previous, dict)
+                        or type(previous.get("sha256")) is not str
+                        or type(previous.get("text")) is not str
+                    ):
+                        raise ValueError
+                except ValueError, TypeError:
+                    raise ActivityStateError("Saved moderation rules are invalid.") from None
+                changed = previous is None or previous["sha256"] != rules.sha256
+                revision = (int(row[1]) if row is not None else 0) + int(changed)
+                if changed:
+                    connection.execute(
+                        "INSERT INTO configurations VALUES (?, 'moderation_rules', ?, ?, ?) "
+                        "ON CONFLICT(guild_id, key) DO UPDATE SET value_json=excluded.value_json, "
+                        "revision=excluded.revision, updated_us=excluded.updated_us",
+                        (guild, encoded, revision, now),
+                    )
+                return revision
+
+        return await self._call(operation)
+
+    async def rules_revision(self, guild_id: int) -> tuple[int, str] | None:
+        """The saved rule revision and digest, or None before the first configuration."""
+        guild = _identifier(guild_id)
+
+        def operation() -> tuple[int, str] | None:
+            connection = self._database()
+            row = connection.execute(
+                "SELECT value_json, revision FROM configurations "
+                "WHERE guild_id=? AND key='moderation_rules'",
+                (guild,),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                saved = json.loads(row[0])
+                digest = saved["sha256"]
+                if type(digest) is not str:
+                    raise ValueError
+            except ValueError, TypeError, KeyError:
+                raise ActivityStateError("Saved moderation rules are invalid.") from None
+            return int(row[1]), digest
 
         return await self._call(operation)
 

@@ -17,6 +17,8 @@ from afterhours_bot.activity_service import (
     reconcile_active_role,
 )
 from afterhours_bot.config import Settings
+from afterhours_bot.moderation import ModerationIntake, select_message
+from afterhours_bot.rules import load_rules
 from afterhours_bot.storage import ActivityStateError, ActivityStore
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,10 @@ class CommunityBot(discord.Client):
         intents = discord.Intents.none()
         intents.guilds = True
         intents.members = settings.active_role is not None
+        if settings.moderation is not None:
+            # Reviewing messages needs their events and the privileged content intent.
+            intents.guild_messages = True
+            intents.message_content = True
         super().__init__(
             intents=intents,
             allowed_mentions=discord.AllowedMentions.none(),
@@ -62,7 +68,13 @@ class CommunityBot(discord.Client):
         self.sync_commands = sync_commands
         self.tree = CommunityTree(self)
         self._activity_task: asyncio.Task[None] | None = None
+        self._moderation_task: asyncio.Task[None] | None = None
         self.store = ActivityStore(settings.database_path)
+        self.moderation = (
+            ModerationIntake(settings.moderation) if settings.moderation is not None else None
+        )
+        self.rules_revision: int | None = None
+        self.rules_digest: str | None = None
         guild = discord.Object(id=settings.guild_id)
 
         @self.tree.command(
@@ -83,15 +95,72 @@ class CommunityBot(discord.Client):
                 ephemeral=True,
             )
 
+        @self.tree.command(
+            name="moderation",
+            description="Staff only: moderation feature status.",
+            guild=guild,
+        )
+        @app_commands.guild_only()
+        @app_commands.default_permissions(manage_messages=True)
+        async def moderation(interaction: discord.Interaction[CommunityBot]) -> None:
+            await interaction.response.send_message(self.moderation_status(), ephemeral=True)
+
+    def moderation_status(self) -> str:
+        """Feature state for staff; it never includes message text, members or secrets."""
+        settings = self.settings.moderation
+        if settings is None or self.moderation is None:
+            return "Moderation is off. Set MODERATION_STAFF_CHANNEL_ID to enable message review."
+        counters = self.moderation.counters
+        rules = (
+            f"revision {self.rules_revision} ({self.rules_digest[:12]})"
+            if self.rules_revision is not None and self.rules_digest is not None
+            else "not loaded"
+        )
+        worker = (
+            "running"
+            if self._moderation_task is not None and not self._moderation_task.done()
+            else "stopped"
+        )
+        return (
+            "Moderation is on (shadow mode: no automatic actions).\n"
+            f"Staff channel: <#{settings.staff_channel_id}>\n"
+            f"Rules: {rules}\n"
+            f"Message Content intent: {'granted' if self.intents.message_content else 'off'}\n"
+            f"Review worker: {worker}\n"
+            f"Intake: {counters.submitted} submitted, {counters.queued} queued, "
+            f"{counters.dropped} dropped, {counters.reviewed} reviewed, "
+            f"{counters.failed} failed, {counters.pending} pending."
+        )
+
     async def setup_hook(self) -> None:
         await self.store.configure(
             self.settings.guild_id, self.settings.active_role, as_of=datetime.now(UTC)
         )
+        if self.settings.moderation is not None:
+            rules = await asyncio.to_thread(load_rules, self.settings.moderation.rules_path)
+            self.rules_revision = await self.store.configure_rules(
+                self.settings.guild_id, rules, as_of=datetime.now(UTC)
+            )
+            self.rules_digest = rules.sha256
+            logger.info(
+                "Moderation rules loaded: revision %d (%s).",
+                self.rules_revision,
+                rules.short_digest,
+            )
         if self.sync_commands:
             commands = await self.tree.sync(guild=discord.Object(id=self.settings.guild_id))
             logger.info("Registered %d community commands.", len(commands))
         if self.settings.active_role is not None and self._activity_task is None:
             self._activity_task = asyncio.create_task(self._activity_loop(), name="active-role")
+        if self.moderation is not None and self._moderation_task is None:
+            self._moderation_task = asyncio.create_task(self.moderation.run(), name="moderation")
+
+    async def on_message(self, message: discord.Message) -> None:
+        if self.moderation is None or self.settings.moderation is None:
+            return
+        selected = select_message(message, self.settings.moderation, self.settings.guild_id)
+        if selected is not None:
+            self.moderation.submit(selected)
 
     async def _activity_loop(self) -> None:
         settings = self.settings.active_role
@@ -131,11 +200,13 @@ class CommunityBot(discord.Client):
             await asyncio.sleep(max(0, ACTIVITY_INTERVAL_SECONDS - elapsed))
 
     async def close(self) -> None:
-        if self._activity_task is not None:
-            self._activity_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._activity_task
-            self._activity_task = None
+        for task in (self._activity_task, self._moderation_task):
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        self._activity_task = None
+        self._moderation_task = None
         try:
             await self.store.close()
         finally:

@@ -39,11 +39,28 @@ def _snowflake(raw: str, name: str) -> int:
 
 
 @dataclass(frozen=True)
+class ModerationSettings:
+    """Review is enabled by naming the staff channel; it needs the Message Content intent."""
+
+    staff_channel_id: int
+    rules_path: Path = Path("rules/community-rules.md")
+    queue_size: int = 1000
+
+
+def _file_path(env: Mapping[str, str], name: str, default: str) -> Path:
+    raw = env.get(name, default).strip()
+    if not raw or "\x00" in raw:
+        raise ConfigurationError(f"{name} must name a file.")
+    return Path(raw)
+
+
+@dataclass(frozen=True)
 class Settings:
     token: str = field(repr=False)
     guild_id: int
     active_role: ActiveRoleSettings | None = None
     database_path: Path = Path("data/nightshift.sqlite3")
+    moderation: ModerationSettings | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -71,9 +88,22 @@ class Settings:
         database_path = env.get("NIGHTSHIFT_DATABASE_PATH", "data/nightshift.sqlite3").strip()
         if not database_path or "\x00" in database_path or database_path == ":memory:":
             raise ConfigurationError("NIGHTSHIFT_DATABASE_PATH must name a database file.")
+        rules_path = _file_path(env, "MODERATION_RULES_PATH", "rules/community-rules.md")
+        queue_size = _positive_integer(env, "MODERATION_QUEUE_SIZE", 1000, 100_000)
+        raw_staff_channel = env.get("MODERATION_STAFF_CHANNEL_ID", "").strip()
+        moderation = (
+            ModerationSettings(
+                staff_channel_id=_snowflake(raw_staff_channel, "MODERATION_STAFF_CHANNEL_ID"),
+                rules_path=rules_path,
+                queue_size=queue_size,
+            )
+            if raw_staff_channel
+            else None
+        )
         return cls(
             token=token,
             guild_id=guild_id,
             active_role=active_role,
             database_path=Path(database_path),
+            moderation=moderation,
         )
