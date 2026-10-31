@@ -397,10 +397,14 @@ uv run --locked --env-file .env afterhours-bot-evaluate
 ```
 
 It prints per-rule precision and recall and the mismatched example IDs, never
-the texts, and exits non-zero when any example got no verdict. Add your own
-examples to a copy of the file and pass `--examples`. This is a manual check
-against a live endpoint; the offline test suite uses a fake endpoint and does
-not prove any particular model's accuracy.
+the texts, and exits non-zero when any example got no verdict. `--verbose`
+lists every example's verdict, score and model reason, which is the quickest
+way to see why a message was flagged while tuning the guidance. Add your own
+examples to a copy of the file and pass `--examples`; an example may carry a
+`context` list of earlier channel messages, oldest first, to reproduce how a
+short reply is judged with context. This is a manual check against a live
+endpoint; the offline test suite uses a fake endpoint and does not prove any
+particular model's accuracy.
 
 ## Persistent data
 

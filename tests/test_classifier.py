@@ -515,6 +515,23 @@ def test_repository_examples_are_well_formed_and_cover_every_rule_and_injection(
     assert sum(example.rule is None for example in examples) >= 8
     assert sum(example.id.startswith("injection-") for example in examples) >= 3
     assert all(example.rule in (None, *RULE_NUMBERS) for example in examples)
+    assert any(example.context for example in examples)
+
+
+def test_evaluation_sends_example_context_to_the_endpoint() -> None:
+    examples = (Example("reply", None, "yeah it does", ("does the tool store tokens?",)),)
+    endpoint = FakeEndpoint([verdict_json(None, 0)])
+
+    async def scenario(url: str) -> None:
+        instance = classifier(url)
+        try:
+            report = await evaluate_examples(instance, examples, min_score=0.5)
+        finally:
+            await instance.close()
+        assert report.correct == 1
+        prompt = endpoint.requests[0]["messages"][-1]["content"]
+        assert "Earlier messages in the same channel" in str(prompt)
+        assert "does the tool store tokens?" in str(prompt)
 
 
 @pytest.mark.parametrize(
@@ -526,6 +543,9 @@ def test_repository_examples_are_well_formed_and_cover_every_rule_and_injection(
         '{"examples": [{"id": "a", "rule": "2", "text": "x"}]}',
         '{"examples": [{"id": "a", "rule": 2, "text": "x"}, {"id": "a", "rule": 2, "text": "y"}]}',
         '{"examples": [{"id": "", "rule": 2, "text": "x"}]}',
+        '{"examples": [{"id": "a", "rule": 2, "text": "x", "context": "earlier"}]}',
+        '{"examples": [{"id": "a", "rule": 2, "text": "x", "context": [" "]}]}',
+        '{"examples": [{"id": "a", "rule": 2, "text": "x", "context": [1]}]}',
         "not json",
     ],
 )
