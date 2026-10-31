@@ -74,6 +74,49 @@ class LlmSettings:
     cooldown_seconds: int = 300
     min_score: float = 0.5
     skip_staff: bool = True
+    vision_model: str | None = None
+    context_messages: int = 3
+
+
+AUTO_SOURCES = frozenset({"repeat", "invite", "link-domain", "attachment"})
+AUTO_ACTIONS = ("delete", "warn", "timeout")
+
+
+@dataclass(frozen=True)
+class AutoAction:
+    """An action the bot takes by itself for one deterministic filter result."""
+
+    source: str
+    rule: int
+    action: str
+    min_score: float
+
+
+def _auto_actions(env: Mapping[str, str], name: str) -> tuple[AutoAction, ...]:
+    """Parse `source:rule:action:min_score` entries; only deterministic sources qualify."""
+    entries: list[AutoAction] = []
+    for item in env.get(name, "").split(","):
+        item = item.strip().lower()
+        if not item:
+            continue
+        parts = item.split(":")
+        if len(parts) != 4:
+            raise ConfigurationError(f"{name} entries must look like source:rule:action:score.")
+        source, rule, action, score = parts
+        if source not in AUTO_SOURCES:
+            raise ConfigurationError(
+                f"{name} sources must be one of " + ", ".join(sorted(AUTO_SOURCES)) + "."
+            )
+        if not rule.isdecimal() or not 1 <= int(rule) <= 99:
+            raise ConfigurationError(f"{name} rules must be numbers from 1 to 99.")
+        if action not in AUTO_ACTIONS:
+            raise ConfigurationError(
+                f"{name} actions must be one of " + ", ".join(AUTO_ACTIONS) + "."
+            )
+        entries.append(AutoAction(source, int(rule), action, _fraction({name: score}, name, "")))
+    if len(entries) > 100:
+        raise ConfigurationError(f"{name} supports at most 100 entries.")
+    return tuple(entries)
 
 
 DEFAULT_WARN_TEMPLATE = (
@@ -103,6 +146,7 @@ class ModerationSettings:
     timeout_minutes: int = 60
     button_expiry_hours: int = 72
     warn_template: str = DEFAULT_WARN_TEMPLATE
+    auto_actions: tuple[AutoAction, ...] = ()
 
 
 def _template(env: Mapping[str, str], name: str, default: str) -> str:
@@ -197,7 +241,18 @@ def parse_llm_settings(env: Mapping[str, str]) -> LlmSettings | None:
         cooldown_seconds=_positive_integer(env, "MODERATION_LLM_COOLDOWN_SECONDS", 300, 86_400),
         min_score=_fraction(env, "MODERATION_LLM_MIN_SCORE", "0.5"),
         skip_staff=_flag(env, "MODERATION_LLM_SKIP_STAFF", "true"),
+        vision_model=_model_name(env, "MODERATION_LLM_VISION_MODEL"),
+        context_messages=_bounded_integer(env, "MODERATION_LLM_CONTEXT_MESSAGES", 3, 0, 10),
     )
+
+
+def _model_name(env: Mapping[str, str], name: str) -> str | None:
+    raw = env.get(name, "").strip()
+    if not raw:
+        return None
+    if len(raw) > 200 or not raw.isascii() or any(c.isspace() for c in raw):
+        raise ConfigurationError(f"{name} must be a single model name.")
+    return raw
 
 
 def _deny_list(env: Mapping[str, str], name: str, default: str) -> tuple[DenyEntry, ...]:
@@ -288,6 +343,7 @@ class Settings:
                     env, "MODERATION_BUTTON_EXPIRY_HOURS", 72, 8760
                 ),
                 warn_template=_template(env, "MODERATION_WARN_TEMPLATE", DEFAULT_WARN_TEMPLATE),
+                auto_actions=_auto_actions(env, "MODERATION_AUTO_ACTIONS"),
             )
             if raw_staff_channel
             else None

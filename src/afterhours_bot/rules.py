@@ -13,7 +13,7 @@ RULE_HEADING = re.compile(r"^#+\s*(\d{1,2})\.[ \t]*(.*)$", re.MULTILINE)
 
 
 class ModerationRulesError(RuntimeError):
-    """The rule file is missing, unreadable, empty or too large."""
+    """The rule text is missing, unreadable, empty or too large."""
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,21 @@ class RuleSet:
         return titles
 
 
+def parse_rules(raw: bytes, *, max_bytes: int = MAX_RULES_BYTES) -> RuleSet:
+    """Normalize rule text from bytes: UTF-8, LF endings, trimmed, size-bounded."""
+    if len(raw) > max_bytes:
+        raise ModerationRulesError(f"The rule text exceeds {max_bytes} bytes.")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ModerationRulesError("The rule text must be UTF-8.") from None
+    text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        raise ModerationRulesError("The rule text is empty.")
+    text += "\n"
+    return RuleSet(text=text, sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
+
+
 def load_rules(path: Path, *, max_bytes: int = MAX_RULES_BYTES) -> RuleSet:
     """Read and normalize the rule file. Blocking I/O; call it off the event loop."""
     try:
@@ -51,14 +66,4 @@ def load_rules(path: Path, *, max_bytes: int = MAX_RULES_BYTES) -> RuleSet:
         raise ModerationRulesError("The rule file does not exist.") from None
     except OSError:
         raise ModerationRulesError("The rule file could not be read.") from None
-    if len(raw) > max_bytes:
-        raise ModerationRulesError(f"The rule file exceeds {max_bytes} bytes.")
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        raise ModerationRulesError("The rule file must be UTF-8 text.") from None
-    text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not text:
-        raise ModerationRulesError("The rule file is empty.")
-    text += "\n"
-    return RuleSet(text=text, sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
+    return parse_rules(raw, max_bytes=max_bytes)

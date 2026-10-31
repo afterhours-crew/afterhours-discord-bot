@@ -20,7 +20,13 @@ from afterhours_bot.classifier import Classifier
 from afterhours_bot.config import Settings
 from afterhours_bot.moderation import ModerationIntake, select_message
 from afterhours_bot.review import ReviewView, StaffReviewer
-from afterhours_bot.rules import ModerationRulesError, RuleSet, load_rules
+from afterhours_bot.rules import (
+    MAX_RULES_BYTES,
+    ModerationRulesError,
+    RuleSet,
+    load_rules,
+    parse_rules,
+)
 from afterhours_bot.storage import ActivityStateError, ActivityStore
 
 logger = logging.getLogger(__name__)
@@ -75,6 +81,8 @@ class CommunityBot(discord.Client):
         self.rules_revision: int | None = None
         self.rules_digest: str | None = None
         self.rules: RuleSet | None = None
+        self.rules_source = "file"
+        self.file_rules_digest: str | None = None
         self.guidance: RuleSet | None = None
         self.reviewer: StaffReviewer | None = None
         self.moderation: ModerationIntake | None = None
@@ -127,6 +135,94 @@ class CommunityBot(discord.Client):
         async def moderation(interaction: discord.Interaction[CommunityBot]) -> None:
             await interaction.response.send_message(await self.moderation_status(), ephemeral=True)
 
+        rules_group = app_commands.Group(
+            name="rules",
+            description="Staff only: the rule text the moderation feature uses.",
+            guild_only=True,
+            default_permissions=discord.Permissions(manage_messages=True),
+        )
+
+        @rules_group.command(name="show", description="Show the active rule revision.")
+        async def rules_show(interaction: discord.Interaction[CommunityBot]) -> None:
+            await interaction.response.send_message(self.rules_status(), ephemeral=True)
+
+        @rules_group.command(name="reload", description="Re-read the rule file from disk.")
+        async def rules_reload(interaction: discord.Interaction[CommunityBot]) -> None:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            await interaction.followup.send(await self.reload_rules(), ephemeral=True)
+
+        @rules_group.command(
+            name="upload", description="Replace the rule text with an uploaded .md or .txt file."
+        )
+        @app_commands.describe(file="UTF-8 Markdown or text, at most 64 KiB.")
+        async def rules_upload(
+            interaction: discord.Interaction[CommunityBot], file: discord.Attachment
+        ) -> None:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            await interaction.followup.send(await self.upload_rules(file), ephemeral=True)
+
+        self.tree.add_command(rules_group, guild=guild)
+
+    def rules_status(self) -> str:
+        if self.settings.moderation is None or self.rules is None:
+            return "Moderation is off; no rule text is active."
+        numbers = ", ".join(str(number) for number in self.rules.numbers) or "none"
+        return (
+            f"Rules revision {self.rules_revision} ({self.rules.short_digest}), "
+            f"source: {self.rules_source}, rule numbers: {numbers}."
+        )
+
+    async def _apply_rules(self, rules: RuleSet, *, source: str) -> str:
+        if self.settings.moderation is None:
+            return "Moderation is off."
+        if not rules.numbers:
+            return "Rejected: the text has no numbered rule headings such as `# 1. Title`."
+        self.rules_revision = await self.store.configure_rules(
+            self.settings.guild_id,
+            rules,
+            as_of=datetime.now(UTC),
+            source=source,
+            file_sha256=self.file_rules_digest,
+        )
+        self.rules = rules
+        self.rules_digest = rules.sha256
+        self.rules_source = source
+        logger.info(
+            "Moderation rules applied from %s: revision %d (%s).",
+            source,
+            self.rules_revision,
+            rules.short_digest,
+        )
+        return self.rules_status()
+
+    async def reload_rules(self) -> str:
+        if self.settings.moderation is None:
+            return "Moderation is off."
+        try:
+            rules = await asyncio.to_thread(load_rules, self.settings.moderation.rules_path)
+        except ModerationRulesError as error:
+            return f"The rule file could not be loaded: {error}"
+        self.file_rules_digest = rules.sha256
+        return await self._apply_rules(rules, source="file")
+
+    async def upload_rules(self, file: discord.Attachment) -> str:
+        if self.settings.moderation is None:
+            return "Moderation is off."
+        name = file.filename.lower()
+        if not (name.endswith(".md") or name.endswith(".txt")):
+            return "Rejected: upload a .md or .txt file."
+        if file.size > MAX_RULES_BYTES:
+            return f"Rejected: the file exceeds {MAX_RULES_BYTES} bytes."
+        try:
+            raw = await file.read()
+            rules = parse_rules(raw)
+        except discord.HTTPException as error:
+            logger.warning("Rule upload could not be read (%s).", type(error).__name__)
+            return "The attachment could not be downloaded; try again."
+        except ModerationRulesError as error:
+            return f"Rejected: {error}"
+        return await self._apply_rules(rules, source="upload")
+
     async def moderation_status(self) -> str:
         """Feature state for staff; it never includes message text, members or secrets."""
         settings = self.settings.moderation
@@ -146,10 +242,15 @@ class CommunityBot(discord.Client):
             if self._moderation_task is not None and not self._moderation_task.done()
             else "stopped"
         )
+        mode = (
+            f"{len(settings.auto_actions)} automatic action rule(s) configured"
+            if settings.auto_actions
+            else "shadow mode: no automatic actions"
+        )
         return (
-            "Moderation is on (shadow mode: no automatic actions).\n"
+            f"Moderation is on ({mode}).\n"
             f"Staff channel: <#{settings.staff_channel_id}>\n"
-            f"Rules: {rules}\n"
+            f"Rules: {rules}, source {self.rules_source}\n"
             f"Message Content intent: {'granted' if self.intents.message_content else 'off'}\n"
             f"Review worker: {worker}\n"
             f"Intake: {counters.submitted} submitted, {counters.queued} queued, "
@@ -157,7 +258,8 @@ class CommunityBot(discord.Client):
             f"{counters.failed} failed, {counters.pending} pending.\n"
             f"Flags: {review.flagged} flagged, {review.posted} posted, "
             f"{review.suppressed} rate limited, {review.unposted} unposted, "
-            f"{review.decisions} decided, {review.actions} actions done this run; "
+            f"{review.decisions} decided, {review.automatic} automatic, "
+            f"{review.actions} actions done, {review.reflagged} edits re-flagged this run; "
             f"staff posting {posting}.\n"
             f"Audit: {stored} stored flags, {open_flags} awaiting a decision.\n"
             f"Classifier: {self.classifier_status()}"
@@ -170,8 +272,9 @@ class CommunityBot(discord.Client):
         counts = self.classifier.counters
         state = "available" if self.classifier.available else "unavailable (circuit open)"
         guidance = "with guidance" if self.guidance is not None else "without guidance"
+        vision = f", images via {llm.vision_model}" if llm.vision_model else ""
         return (
-            f"{state}, model {llm.model} {guidance}; {counts.requests} answers, "
+            f"{state}, model {llm.model} {guidance}{vision}; {counts.requests} answers, "
             f"{counts.verdicts} verdicts, {counts.invalid} off-schema, "
             f"{counts.failures} failures, {counts.skipped_open} skipped while open."
         )
@@ -181,17 +284,26 @@ class CommunityBot(discord.Client):
             self.settings.guild_id, self.settings.active_role, as_of=datetime.now(UTC)
         )
         if self.settings.moderation is not None:
-            rules = await asyncio.to_thread(load_rules, self.settings.moderation.rules_path)
-            self.rules_revision = await self.store.configure_rules(
-                self.settings.guild_id, rules, as_of=datetime.now(UTC)
-            )
-            self.rules_digest = rules.sha256
-            self.rules = rules
-            logger.info(
-                "Moderation rules loaded: revision %d (%s).",
-                self.rules_revision,
-                rules.short_digest,
-            )
+            file_rules = await asyncio.to_thread(load_rules, self.settings.moderation.rules_path)
+            self.file_rules_digest = file_rules.sha256
+            saved = await self.store.active_rules(self.settings.guild_id)
+            if (
+                saved is not None
+                and saved.source == "upload"
+                and saved.file_sha256 == file_rules.sha256
+            ):
+                # An uploaded text stays active until the file itself changes.
+                self.rules = RuleSet(text=saved.text, sha256=saved.sha256)
+                self.rules_revision = saved.revision
+                self.rules_digest = saved.sha256
+                self.rules_source = "upload"
+                logger.info(
+                    "Moderation rules loaded from an earlier upload: revision %d (%s).",
+                    saved.revision,
+                    self.rules.short_digest,
+                )
+            else:
+                await self._apply_rules(file_rules, source="file")
             llm = self.settings.moderation.llm
             if llm is not None and llm.guidance_path is not None:
                 try:
@@ -215,6 +327,16 @@ class CommunityBot(discord.Client):
         if self.moderation is None or self.settings.moderation is None:
             return
         selected = select_message(message, self.settings.moderation, self.settings.guild_id)
+        if selected is not None:
+            self.moderation.submit(selected)
+
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
+        """Edited messages are reviewed again; the message cache is off, so use the raw event."""
+        if self.moderation is None or self.settings.moderation is None:
+            return
+        selected = select_message(
+            payload.message, self.settings.moderation, self.settings.guild_id, edited=True
+        )
         if selected is not None:
             self.moderation.submit(selected)
 

@@ -5,8 +5,8 @@
 
 import asyncio
 import logging
-from collections import deque
-from collections.abc import Callable, Mapping
+from collections import OrderedDict, deque
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
@@ -14,7 +14,7 @@ import discord
 
 from afterhours_bot.actions import ActionExecutor, ActionTarget, Outcome
 from afterhours_bot.classifier import Classifier
-from afterhours_bot.config import ModerationSettings
+from afterhours_bot.config import AutoAction, ModerationSettings
 from afterhours_bot.filters import Flag, RepeatTracker, evaluate
 from afterhours_bot.moderation import IntakeMessage
 from afterhours_bot.storage import ActivityStore
@@ -25,6 +25,8 @@ POSTING_RETRY_SECONDS = 600.0
 LOG_INTERVAL_SECONDS = 60.0
 CUSTOM_ID_PREFIX = "nightshift:review:"
 DECISIONS = ("dismiss", "delete", "warn", "timeout")
+CONTEXT_CHARS = 200
+MAX_CONTEXT_CHANNELS = 500
 
 type StaffChannel = discord.TextChannel | discord.Thread
 
@@ -41,6 +43,8 @@ class ReviewCounters:
     unposted: int = 0
     decisions: int = 0
     actions: int = 0
+    automatic: int = 0
+    reflagged: int = 0
 
 
 def format_post(message: IntakeMessage, flags: tuple[Flag, ...], rules_revision: int | None) -> str:
@@ -80,6 +84,7 @@ class StaffReviewer:
         self.clock = clock
         self.classifier = classifier
         self.executor = ActionExecutor(client, settings, guild_id=guild_id, rule_titles=rule_titles)
+        self._context: OrderedDict[int, deque[tuple[int, str]]] = OrderedDict()
         self.tracker = RepeatTracker(settings.repeat_window_seconds, settings.repeat_threshold)
         self._counters = ReviewCounters()
         self._recent_posts: deque[float] = deque()
@@ -97,21 +102,75 @@ class StaffReviewer:
             and asyncio.get_running_loop().time() < self._posting_disabled_until
         )
 
-    def _classifiable(self, message: IntakeMessage) -> bool:
+    def _model_allowed(self, message: IntakeMessage) -> bool:
         llm = self.settings.llm
-        if llm is None or self.classifier is None or not message.content.strip():
+        if llm is None or self.classifier is None:
             return False
         return not (llm.skip_staff and message.author_manages_messages)
 
+    def _context_for(self, message: IntakeMessage) -> tuple[str, ...]:
+        llm = self.settings.llm
+        if llm is None or llm.context_messages == 0:
+            return ()
+        recent = self._context.get(message.channel_id)
+        if not recent:
+            return ()
+        return tuple(line for _, line in recent)
+
+    def _remember(self, message: IntakeMessage) -> None:
+        """Keep a bounded, in-memory tail of each channel for model context only."""
+        llm = self.settings.llm
+        if llm is None or llm.context_messages == 0 or message.edited:
+            return
+        text = " ".join(message.content.split())[:CONTEXT_CHARS]
+        if not text:
+            return
+        recent = self._context.get(message.channel_id)
+        if recent is None:
+            while len(self._context) >= MAX_CONTEXT_CHANNELS:
+                self._context.popitem(last=False)
+            recent = deque(maxlen=llm.context_messages)
+            self._context[message.channel_id] = recent
+        else:
+            self._context.move_to_end(message.channel_id)
+        recent.append((message.author_id, f"member {message.author_id % 1000:03d}: {text}"))
+
     async def review(self, message: IntakeMessage) -> None:
         flags = evaluate(message, self.settings, self.tracker)
-        if not flags and self._classifiable(message):
+        if not flags and self._model_allowed(message):
             # The model only sees what the deterministic filters let through.
-            flags = await self._classify(message)
+            if message.content.strip():
+                flags = await self._classify(message, context=self._context_for(message))
+            if not flags and message.image_urls:
+                flags = await self._classify(message, image_urls=message.image_urls)
+        self._remember(message)
         if not flags:
             return
         self._counters = replace(self._counters, flagged=self._counters.flagged + 1)
-        post_id = await self._post(message, flags)
+        existing_count, existing_post = 0, None
+        if message.edited:
+            existing_count, existing_post = await self.store.message_flags(
+                self.guild_id, message.message_id
+            )
+        auto = None if existing_count else self._auto_action(message, flags)
+        outcome: Outcome | None = None
+        if auto is not None:
+            target = ActionTarget(
+                message.message_id, message.channel_id, message.author_id, (auto.rule,)
+            )
+            outcome = await self.executor.perform(auto.action, target)
+            note = (
+                f"**Automatic:** {auto.action} ({auto.source}, rule {auto.rule}) — "
+                f"{outcome.summary}"
+            )
+        else:
+            note = None
+        if existing_count:
+            # An edited message that was already flagged keeps its first review post.
+            self._counters = replace(self._counters, reflagged=self._counters.reflagged + 1)
+            post_id = existing_post
+        else:
+            post_id = await self._post(message, flags, note=note)
         await self.store.record_flags(
             self.guild_id,
             message_id=message.message_id,
@@ -124,15 +183,57 @@ class StaffReviewer:
             retention_days=self.settings.audit_retention_days,
             max_rows=self.settings.audit_max_rows,
         )
+        if auto is not None and outcome is not None:
+            await self.store.record_auto_decision(
+                self.guild_id,
+                message.message_id,
+                decision=f"auto-{auto.action}",
+                decider_id=self._bot_id(),
+                outcome=outcome.summary,
+                as_of=self.clock(),
+            )
+            self._counters = replace(self._counters, automatic=self._counters.automatic + 1)
+            if outcome.ok:
+                self._counters = replace(self._counters, actions=self._counters.actions + 1)
 
-    async def _classify(self, message: IntakeMessage) -> tuple[Flag, ...]:
+    def _bot_id(self) -> int:
+        user = self.client.user
+        return user.id if user is not None else self.guild_id
+
+    def _auto_action(self, message: IntakeMessage, flags: tuple[Flag, ...]) -> AutoAction | None:
+        """The first configured automatic action a deterministic flag satisfies, if any."""
+        if message.author_manages_messages:
+            return None
+        for configured in self.settings.auto_actions:
+            for flag in flags:
+                if (
+                    flag.source == configured.source
+                    and flag.rule == configured.rule
+                    and flag.score >= configured.min_score
+                ):
+                    return configured
+        return None
+
+    async def _classify(
+        self,
+        message: IntakeMessage,
+        *,
+        context: Sequence[str] = (),
+        image_urls: Sequence[str] = (),
+    ) -> tuple[Flag, ...]:
         llm = self.settings.llm
         if llm is None or self.classifier is None:
             return ()
-        verdict = await self.classifier.classify(message.content)
+        if image_urls and llm.vision_model is None:
+            return ()
+        verdict = await self.classifier.classify(
+            message.content, context=context, image_urls=image_urls
+        )
         if verdict is None or verdict.rule is None or verdict.score < llm.min_score:
             return ()
-        return (Flag(verdict.rule, verdict.score, "llm", f"model: {verdict.reason}"),)
+        source = "llm-image" if image_urls else "llm"
+        prefix = "model (image)" if image_urls else "model"
+        return (Flag(verdict.rule, verdict.score, source, f"{prefix}: {verdict.reason}"),)
 
     def _rate_limited(self, now: float) -> bool:
         while self._recent_posts and now - self._recent_posts[0] >= RATE_WINDOW_SECONDS:
@@ -152,7 +253,9 @@ class StaffReviewer:
             return None
         return channel
 
-    async def _post(self, message: IntakeMessage, flags: tuple[Flag, ...]) -> int | None:
+    async def _post(
+        self, message: IntakeMessage, flags: tuple[Flag, ...], *, note: str | None = None
+    ) -> int | None:
         now = asyncio.get_running_loop().time()
         if self.posting_disabled:
             self._counters = replace(self._counters, unposted=self._counters.unposted + 1)
@@ -173,9 +276,12 @@ class StaffReviewer:
             channel = await self._staff_channel()
             if channel is None:
                 raise StaffChannelUnavailable
+            text = format_post(message, flags, self.rules_revision())
+            if note is not None:
+                text += f"\n{note}"
             post = await channel.send(
-                format_post(message, flags, self.rules_revision()),
-                view=ReviewView(self),
+                text,
+                view=ReviewView(self) if note is None else discord.utils.MISSING,
                 allowed_mentions=discord.AllowedMentions.none(),
                 silent=True,
             )

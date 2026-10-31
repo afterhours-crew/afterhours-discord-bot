@@ -29,7 +29,12 @@ def test_commands_are_guild_scoped_and_privileged_intents_are_disabled() -> None
         async with CommunityBot(SETTINGS) as bot:
             assert bot.tree.get_commands() == []
             commands = bot.tree.get_commands(guild=discord.Object(id=123))
-            assert {command.name for command in commands} == {"ping", "about", "moderation"}
+            assert {command.name for command in commands} == {
+                "ping",
+                "about",
+                "moderation",
+                "rules",
+            }
             assert all(command.guild_only for command in commands)
             assert bot.intents.value == discord.Intents(guilds=True).value
             assert bot.allowed_mentions is not None
