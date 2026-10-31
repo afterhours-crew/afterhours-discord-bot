@@ -17,13 +17,12 @@ from afterhours_bot.config import DenyEntry, ModerationSettings
 from afterhours_bot.filters import Flag
 from afterhours_bot.moderation import IntakeMessage
 from afterhours_bot.review import (
-    DEFERRED_ACTION_NOTE,
     ReviewCounters,
     ReviewView,
     StaffReviewer,
     format_post,
 )
-from afterhours_bot.storage import ActivityStateError, ActivityStore, ReviewDecision
+from afterhours_bot.storage import ActivityStateError, ActivityStore
 
 NOW = datetime(2026, 10, 31, 12, tzinfo=UTC)
 SETTINGS = ModerationSettings(
@@ -225,18 +224,24 @@ def test_dismiss_records_the_decision_and_removes_the_buttons(store: ActivitySto
 
 
 @pytest.mark.parametrize("decision", ["delete", "warn", "timeout"])
-def test_other_decisions_are_recorded_and_explain_the_deferred_action(
+def test_other_decisions_are_recorded_and_report_when_the_action_cannot_run(
     store: ActivityStore, decision: str
 ) -> None:
     channel = staff_channel()
 
     async def scenario() -> None:
-        instance, _ = reviewer(store, channel)
+        instance, client = reviewer(store, channel)
+        client.get_guild = Mock(return_value=None)  # No server available to act in.
         await instance.review(intake(1))
-        click = interaction()
+        click = interaction(manage_messages=True)
+        click.permissions = discord.Permissions(manage_messages=True, moderate_members=True)
         await instance.decide(click, decision)
         click.response.edit_message.assert_awaited_once()
-        click.followup.send.assert_awaited_once_with(DEFERRED_ACTION_NOTE, ephemeral=True)
+        content = click.response.edit_message.call_args.kwargs["content"]
+        assert content.endswith(f"**Resolved:** {decision} by <@7> — the server is unavailable")
+        click.followup.send.assert_awaited_once_with(
+            "Not done: the server is unavailable.", ephemeral=True
+        )
         assert await store.flag_summary(123) == (1, 0)
 
     asyncio.run(scenario())
@@ -375,7 +380,11 @@ def test_audit_updates_the_post_id_once_and_isolates_servers(store: ActivityStor
         decision = await store.record_decision(
             123, 9001, decision="dismiss", decider_id=7, as_of=NOW
         )
-        assert decision == ReviewDecision(1, "dismiss", 7, False)
+        assert decision is not None
+        assert (decision.flags, decision.decision, decision.decider_id) == (1, "dismiss", 7)
+        assert not decision.already_decided
+        assert (decision.message_id, decision.channel_id, decision.author_id) == (1, 10, 42)
+        assert decision.rules == (2,)
         assert (
             await store.record_decision(456, 9001, decision="dismiss", decider_id=7, as_of=NOW)
             is None
@@ -418,4 +427,4 @@ def test_schema_version_one_databases_are_migrated(tmp_path: Path) -> None:
 
     asyncio.run(scenario())
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3

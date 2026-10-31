@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MAX_RULES_BYTES = 65_536
-RULE_HEADING = re.compile(r"^#+\s*(\d{1,2})\.", re.MULTILINE)
+RULE_HEADING = re.compile(r"^#+\s*(\d{1,2})\.[ \t]*(.*)$", re.MULTILINE)
 
 
 class ModerationRulesError(RuntimeError):
@@ -28,8 +28,17 @@ class RuleSet:
     @property
     def numbers(self) -> tuple[int, ...]:
         """Rule numbers from headings such as `# 2. No piracy`."""
-        found = {int(match) for match in RULE_HEADING.findall(self.text)}
-        return tuple(sorted(number for number in found if 0 < number < 100))
+        return tuple(sorted(self.titles))
+
+    @property
+    def titles(self) -> dict[int, str]:
+        """Rule number to heading text, for example 2 -> 'No piracy'."""
+        titles: dict[int, str] = {}
+        for number, title in RULE_HEADING.findall(self.text):
+            value = int(number)
+            if 0 < value < 100 and value not in titles:
+                titles[value] = " ".join(title.split()).rstrip(".") or f"rule {value}"
+        return titles
 
 
 def load_rules(path: Path, *, max_bytes: int = MAX_RULES_BYTES) -> RuleSet:

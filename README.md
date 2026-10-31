@@ -194,8 +194,8 @@ Nightshift can help staff enforce the community rules. It receives member
 messages, runs deterministic filters and posts anything suspicious to a staff
 review channel with Dismiss, Delete, Warn and Timeout buttons. This is **shadow
 mode**: the bot only reports and records; it never deletes, warns, times out or
-announces on its own. Dismiss resolves a post; the other buttons record the
-staff decision and ask you to act manually until a later version performs them.
+announces on its own. Every action is a staff click on a review post; see
+[Staff actions](#staff-actions).
 An optional local language model reviews what the filters let through; see
 [Language-model review](#language-model-review).
 
@@ -272,13 +272,35 @@ but not posted, and the log says so once a minute. If the staff channel is
 missing, in another server, not a text channel or not writable, posting pauses
 for ten minutes with one warning and the bot keeps running.
 
-Buttons work for members with **Manage Messages** in the staff channel and keep
-working after a restart. The first decision wins; later clicks see who resolved
-it. The audit table stores message, channel and author IDs, rule, score, filter
-name, reason, rule revision, post ID, decision, decider and timestamps, never
-message text. Rows expire after `MODERATION_AUDIT_RETENTION_DAYS` (default 90)
+Buttons keep working after a restart. The first decision wins; later clicks see
+who resolved it and what happened. The audit table stores message, channel and
+author IDs, rule, score, filter name, reason, rule revision, post ID, decision,
+decider, outcome and timestamps, never message text. Rows expire after `MODERATION_AUDIT_RETENTION_DAYS` (default 90)
 and the table is capped at `MODERATION_AUDIT_MAX_ROWS` (default 100000), oldest
 first. Existing databases are migrated to the new schema at startup.
+
+### Staff actions
+
+The buttons on a review post act when a staff member clicks them; nothing
+happens without that click.
+
+- **Dismiss** resolves the post. Needs **Manage Messages**.
+- **Delete** removes the flagged message. Needs **Manage Messages** for the
+  clicker and for Nightshift in that channel.
+- **Warn** sends the author a private, templated notice naming the rule and
+  channel. Needs **Manage Messages**. Set `MODERATION_WARN_TEMPLATE` to change the
+  text; it may use `{server}`, `{channel}`, `{rule}` and `{title}`.
+- **Timeout** mutes the author for `MODERATION_TIMEOUT_MINUTES` (default 60).
+  Needs **Moderate Members** for the clicker and for Nightshift, and the author's
+  highest role must be below Nightshift's.
+
+Grant Nightshift exactly **View Channel**, **Send Messages** in the staff
+channel, **Manage Messages** and **Moderate Members**; never Administrator. The
+outcome is recorded in the audit and shown on the post, for example "message
+deleted", "the member does not accept direct messages" or "the member's roles are
+not below the bot's". Failures are reported privately in plain words, never with
+raw API details. Buttons other than Dismiss stop acting after
+`MODERATION_BUTTON_EXPIRY_HOURS` (default 72); the post then says to act manually.
 
 ### Language-model review
 

@@ -49,6 +49,12 @@ class ReviewDecision:
     decision: str
     decider_id: int
     already_decided: bool
+    message_id: int = 0
+    channel_id: int = 0
+    author_id: int = 0
+    rules: tuple[int, ...] = ()
+    created_us: int = 0
+    outcome: str | None = None
 
 
 class ActivityStore:
@@ -84,10 +90,14 @@ class ActivityStore:
         try:
             connection.row_factory = sqlite3.Row
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise ActivityStateError("Unsupported activity database schema version.")
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA secure_delete=ON")
+            if version == 2:
+                with self._transaction(connection):
+                    connection.execute("ALTER TABLE review_flags ADD COLUMN outcome TEXT")
+                    connection.execute("PRAGMA user_version=3")
             if version < 2:
                 with self._transaction(connection):
                     connection.execute(
@@ -97,7 +107,7 @@ class ActivityStore:
                         "rule INTEGER NOT NULL, score REAL NOT NULL, reason TEXT NOT NULL, "
                         "rules_revision INTEGER, post_message_id TEXT, "
                         "created_us INTEGER NOT NULL, expires_us INTEGER NOT NULL, "
-                        "decision TEXT, decider_id TEXT, decided_us INTEGER, "
+                        "decision TEXT, decider_id TEXT, decided_us INTEGER, outcome TEXT, "
                         "PRIMARY KEY (guild_id, message_id, source))"
                     )
                     connection.execute(
@@ -109,7 +119,7 @@ class ActivityStore:
                     connection.execute(
                         "CREATE INDEX review_flags_age ON review_flags (guild_id, created_us)"
                     )
-                    connection.execute("PRAGMA user_version=2")
+                    connection.execute("PRAGMA user_version=3")
             if version == 0:
                 with self._transaction(connection):
                     connection.execute(
@@ -135,7 +145,7 @@ class ActivityStore:
                         "(guild_id, source_id, author_id, created_us DESC, message_id DESC)"
                     )
                     connection.execute("CREATE INDEX activity_expiry ON activity (expires_us)")
-                    connection.execute("PRAGMA user_version=2")
+                    connection.execute("PRAGMA user_version=3")
             try:
                 self.path.chmod(0o600)
             except OSError:
@@ -542,19 +552,33 @@ class ActivityStore:
             connection = self._database()
             with self._transaction(connection):
                 rows = connection.execute(
-                    "SELECT decision, decider_id FROM review_flags "
-                    "WHERE guild_id=? AND post_message_id=?",
+                    "SELECT decision, decider_id, message_id, channel_id, author_id, rule, "
+                    "created_us, outcome FROM review_flags "
+                    "WHERE guild_id=? AND post_message_id=? ORDER BY rule",
                     (guild, post),
                 ).fetchall()
                 if not rows:
                     return None
-                settled = [row for row in rows if row[0] is not None]
+                first = rows[0]
+                message_id = int(first["message_id"])
+                channel_id = int(first["channel_id"])
+                author_id = int(first["author_id"])
+                rules = tuple(sorted({int(row["rule"]) for row in rows}))
+                created_us = min(int(row["created_us"]) for row in rows)
+                settled = [row for row in rows if row["decision"] is not None]
                 if settled:
+                    outcome = settled[0]["outcome"]
                     return ReviewDecision(
                         flags=len(rows),
-                        decision=str(settled[0][0]),
-                        decider_id=int(settled[0][1]),
+                        decision=str(settled[0]["decision"]),
+                        decider_id=int(settled[0]["decider_id"]),
                         already_decided=True,
+                        message_id=message_id,
+                        channel_id=channel_id,
+                        author_id=author_id,
+                        rules=rules,
+                        created_us=created_us,
+                        outcome=str(outcome) if outcome is not None else None,
                     )
                 connection.execute(
                     "UPDATE review_flags SET decision=?, decider_id=?, decided_us=? "
@@ -562,8 +586,34 @@ class ActivityStore:
                     (decision, decider, now, guild, post),
                 )
                 return ReviewDecision(
-                    flags=len(rows), decision=decision, decider_id=decider_id, already_decided=False
+                    flags=len(rows),
+                    decision=decision,
+                    decider_id=decider_id,
+                    already_decided=False,
+                    message_id=message_id,
+                    channel_id=channel_id,
+                    author_id=author_id,
+                    rules=rules,
+                    created_us=created_us,
                 )
+
+        return await self._call(operation)
+
+    async def record_outcome(self, guild_id: int, post_message_id: int, outcome: str) -> int:
+        """Store what happened after a decision; returns the number of rows updated."""
+        guild, post = _identifier(guild_id), _identifier(post_message_id)
+        if not outcome or len(outcome) > 200:
+            raise ActivityStateError("Invalid review outcome.")
+
+        def operation() -> int:
+            connection = self._database()
+            with self._transaction(connection):
+                cursor = connection.execute(
+                    "UPDATE review_flags SET outcome=? WHERE guild_id=? AND post_message_id=? "
+                    "AND decision IS NOT NULL",
+                    (outcome, guild, post),
+                )
+                return int(cursor.rowcount)
 
         return await self._call(operation)
 
