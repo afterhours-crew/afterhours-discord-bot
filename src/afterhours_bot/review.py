@@ -73,6 +73,8 @@ def build_embed(
     *,
     show_excerpt: bool = True,
     automatic: str | None = None,
+    flagged_at: datetime | None = None,
+    models: Mapping[str, str] | None = None,
 ) -> discord.Embed:
     """One review post: what was said, which rule, why, and where to find it."""
     numbers = sorted({flag.rule for flag in flags})
@@ -89,16 +91,29 @@ def build_embed(
     embed.description = body or "*(no text)*"
     embed.add_field(name="Author", value=f"<@{message.author_id}>", inline=True)
     embed.add_field(name="Channel", value=f"<#{message.channel_id}>", inline=True)
+    sources = sorted({flag.source for flag in flags})
     embed.add_field(
-        name="Confidence",
-        value=f"{best:.0%} · " + ", ".join(sorted({flag.source for flag in flags})),
-        inline=True,
+        name="Confidence", value=f"{best:.0%} ({best:.2f}) · " + ", ".join(sources), inline=True
     )
     embed.add_field(
         name="Why",
-        value="\n".join(f"{flag.reason} (rule {flag.rule}, {flag.score:.0%})" for flag in flags),
+        value="\n".join(
+            f"{flag.reason} (rule {flag.rule}, score {flag.score:.2f}, {flag.source})"
+            for flag in flags
+        ),
         inline=False,
     )
+    named = models or {}
+    labelled = [f"{source} ({named[source]})" if source in named else source for source in sources]
+    details = [
+        f"Score {best:.2f} · source {', '.join(labelled)}",
+        f"Message {message.message_id} · author {message.author_id} · channel {message.channel_id}",
+        f"Sent {discord.utils.format_dt(message.created_at, 'f')}"
+        + (f" · flagged {discord.utils.format_dt(flagged_at, 'R')}" if flagged_at else "")
+        + (" · edited" if message.edited else ""),
+        f"Rules revision {rules_revision if rules_revision is not None else 'unknown'}",
+    ]
+    embed.add_field(name="Details", value="\n".join(details)[:1024], inline=False)
     if message.attachment_names:
         names = list(message.attachment_names)
         listed = ", ".join(names[:MAX_LISTED_ATTACHMENTS])
@@ -393,6 +408,12 @@ class StaffReviewer:
             channel = await self._staff_channel()
             if channel is None:
                 raise StaffChannelUnavailable
+            llm = self.settings.llm
+            models: dict[str, str] = {}
+            if llm is not None:
+                models["llm"] = llm.model
+                if llm.vision_model:
+                    models["llm-image"] = llm.vision_model
             embed = build_embed(
                 message,
                 flags,
@@ -400,6 +421,8 @@ class StaffReviewer:
                 self.rule_titles(),
                 show_excerpt=self.settings.post_excerpt,
                 automatic=note,
+                flagged_at=self.clock(),
+                models=models,
             )
             view: discord.ui.View = (
                 ReviewView(self, jump_url=message.jump_url)

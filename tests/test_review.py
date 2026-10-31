@@ -101,8 +101,17 @@ def test_post_embed_quotes_the_message_and_names_rule_reason_and_place() -> None
     assert embed.description == "> see https://bad.example/secret-path-1"
     fields = {field.name: field.value for field in embed.fields}
     assert fields["Author"] == "<@42>" and fields["Channel"] == "<#10>"
-    assert fields["Confidence"] == "90% · link-domain"
-    assert fields["Why"] == "1 link to listed domain bad.example (rule 2, 90%)"
+    assert fields["Confidence"] == "90% (0.90) · link-domain"
+    assert fields["Why"] == "1 link to listed domain bad.example (rule 2, score 0.90, link-domain)"
+    assert "Details" in fields
+    detailed = build_embed(
+        intake(1), FLAGS, 7, {}, flagged_at=NOW, models={"link-domain": "n/a", "llm": "qwen"}
+    )
+    details = {field.name: field.value for field in detailed.fields}["Details"].splitlines()
+    assert details[0] == "Score 0.90 · source link-domain (n/a)"
+    assert details[1] == "Message 1 · author 42 · channel 10"
+    assert details[2].startswith("Sent <t:") and "flagged <t:" in details[2]
+    assert details[3] == "Rules revision 7"
     assert embed.footer.text == "rules revision 7 · nothing done automatically"
     assert embed.color is not None and embed.color.value == 0xE74C3C
     hidden = build_embed(intake(1), FLAGS, None, {}, show_excerpt=False)

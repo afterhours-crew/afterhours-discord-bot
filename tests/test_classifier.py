@@ -454,7 +454,9 @@ def test_model_verdicts_become_staff_flags_only_above_the_minimum_score(tmp_path
         channel.send.assert_awaited_once()
         embed = channel.send.call_args.kwargs["embed"]
         why = {field.name: field.value for field in embed.fields}["Why"]
-        assert why == "model: asks for a crack (rule 2, 90%)"
+        assert why == "model: asks for a crack (rule 2, score 0.90, llm)"
+        details = {field.name: field.value for field in embed.fields}["Details"]
+        assert "source llm (m)" in details
         assert embed.title == "Rule 2"  # No titles are wired in this reviewer.
         assert len(endpoint.requests) == 3
 

@@ -391,7 +391,9 @@ def test_images_go_to_the_vision_model_as_image_parts(store: ActivityStore) -> N
         assert parts[1] == {"type": "image_url", "image_url": {"url": "https://cdn.example/a.png"}}
         embed = channel.send.call_args.kwargs["embed"]
         why = {field.name: field.value for field in embed.fields}["Why"]
-        assert why == "model (image): explicit image (rule 5, 95%)"
+        assert why == "model (image): explicit image (rule 5, score 0.95, llm-image)"
+        details = {field.name: field.value for field in embed.fields}["Details"]
+        assert "source llm-image (vision-model)" in details
         assert embed.image.url == "https://cdn.example/a.png"
 
     run_with_server(endpoint, scenario)
